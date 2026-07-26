@@ -1,0 +1,21 @@
+{
+  "name": "monk-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Monk — the whole backend: one Cloudflare Worker, one D1 database, one cron.",
+  "dependencies": {
+    "@noble/curves": "^1.8.1",
+    "@noble/hashes": "^1.7.1"
+  },
+  "devDependencies": {
+    "wrangler": "^3.114.0"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "schema": "wrangler d1 execute monk --remote --file=./schema.sql",
+    "schema:local": "wrangler d1 execute monk --local --file=./schema.sql",
+    "test": "node --test test/*.test.mjs"
+  }
+}

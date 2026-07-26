@@ -1,0 +1,37 @@
+name = "monk"
+main = "monk-worker.js"
+compatibility_date = "2024-09-23"
+
+# One cron is the entire chain-watching apparatus. Every five minutes it
+# replays Transfer + Referral logs, so a monk bought on a secondary market
+# starts earning within a tick without anyone reporting the sale.
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "monk"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+# local dev uses the miniflare sqlite file; the id only matters for --remote
+
+[vars]
+# Day 0 begins at this unix timestamp; the game runs 56 days from here.
+# 2026-08-01T00:00:00Z — set this before you open the doors.
+GAME_START       = "1785542400"
+CONTRACT_ADDRESS = "0x0000000000000000000000000000000000000000"
+# Base mainnet: ETH-denominated, cheap enough that a 0.01 ETH mint is not
+# eaten by gas, and the public RPC is free with no key.
+READ_RPC         = "https://mainnet.base.org"
+CHAIN_ID         = "8453"
+# Block the Monk contract was deployed in — the sync starts here, so setting
+# it correctly saves the first cron pass a very long crawl.
+START_BLOCK      = "0"
+
+# Secrets — never commit these. Set them with:
+#   npx wrangler secret put SESSION_SECRET   # any long random string
+#   npx wrangler secret put ADMIN_KEY        # bearer token for /admin/*
+#
+# First-time setup:
+#   npx wrangler d1 create monk              # paste the id above
+#   npx wrangler d1 execute monk --remote --file=./schema.sql
+#   npx wrangler deploy

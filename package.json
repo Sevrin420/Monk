@@ -1,0 +1,15 @@
+{
+  "name": "monk",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MONK — an abbey, 1200 AD. 56 days of offices, devotion and streaks.",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test:worker": "npm --prefix worker test"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@openzeppelin/contracts": "^5.0.2",
+    "hardhat": "^2.22.0"
+  }
+}
