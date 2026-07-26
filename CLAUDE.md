@@ -107,31 +107,33 @@ that were earning nothing. It also deletes a whole class of backend work.
 **Never add a transfer path.** If ownership can change, every identity below
 breaks.
 
-### 1. `players.devotion` is a MONOTONIC CUMULATIVE counter of BASE devotion
+### 1. THERE IS ONE SCORE, AND IT IS CALLED DEVOTION
 
-It only ever goes up, and it is the rate **one** monk earns — not the score to
-display. **Never decrement it**: every monk's devotion is derived from it by
-subtraction, so lowering it retroactively re-prices every habit in the wallet.
+`players.devotion` is a single monotonic cumulative counter. The level bar
+fills from it and from nothing else, and the one leaderboard ranks it.
+**Never decrement it.** Do not add a second score.
 
-### 2. TOTAL devotion is DERIVED, never stored
+### 2. MONKS MULTIPLY AT THE MOMENT OF EARNING
 
 ```
-monk devotion = players.devotion − monks.bind_mark
-total         = players.monk_count × players.devotion − players.bind_sum
+payout = floor(base × mult_bp / 10000) × monk_count
 ```
 
-The second line is the first summed over a wallet's monks. `monk_count` and
-`bind_sum` move **only at mint**, which is why earning is O(1): one UPDATE on
-one row whether the wallet holds one monk or twenty.
+Each monk adds a whole office: 10 with one monk, 20 with two, 200 with twenty.
+The per-monk value is rounded **before** multiplying, so the number on screen
+is always a whole multiple of the office.
 
-A monk is watermarked at mint, so it picks up your streak immediately but
-collects nothing from before it existed. `recordMint()` is the only writer of
-`monks`, and its `ON CONFLICT DO NOTHING` is load-bearing — without it a
-re-scanned block range would double-count `bind_sum` and inflate the total.
+Applying the count at earning time is what makes it forward-only for free —
+minting speeds up everything afterwards and cannot reach devotion already
+banked. There is no watermark, no settlement, and earning stays one UPDATE on
+one row however many monks are held.
 
-Rank and level come from `devotion` (your practice, tuned so a perfect 56 days
-is exactly Abbot); the leaderboard ranks `total`. Keeping those separate is
-what stops rank being purely pay-to-win.
+`recordMint()` is the only writer of `monks`, and its `ON CONFLICT DO NOTHING`
+is load-bearing — without it a re-scanned block range would inflate
+`monk_count`, and every future office would overpay forever.
+
+Monks multiply offices and X engagement. **Referrals stay flat** (20 per monk
+brought in, no streak, no monk multiplier) — recruiting is not practice.
 
 ### Idempotency
 
@@ -167,20 +169,19 @@ returns. A tampered client can lie to its own screen and nowhere else.
 
 - Offices: `confess` 1, `pray` 2, `candles` 4 — a bitmask in `players.tasks_mask`.
   **Never reorder those bits**, they are persisted.
-- 10 devotion per office; all three in a day advances the streak.
+- 10 devotion per office **per monk held**; all three in a day advances the streak.
 - Streak tiers: 7d ×1.5, 14d ×2, 21d ×2.5, 28d ×3.
 - `streakForDay()` counts **today** as part of the run being built, so the
   multiplier is fixed for the whole day rather than changing between the first
   and third office.
-- X: like 2, comment 3, repost 5 — multiplied by the streak.
-- Referrals: 20 per monk, **flat** (no multiplier).
+- X: like 2, comment 3, repost 5 — multiplied by streak AND monks.
+- Referrals: 20 per monk brought in, **flat** (no multiplier of any kind).
 - Levels: devotion to reach level L is `15·L·(L−1)`. Ranks are one per level,
-  Postulant → Abbot, tuned so a perfect 56-day run lands on exactly level 16.
-  Levels track `devotion` (practice), NOT `total` — so rank cannot be bought.
+  Postulant → Abbot. A **one-monk** perfect 56-day run lands on exactly level
+  16, which is the baseline the curve is tuned against; holding more monks
+  reaches Abbot sooner and keeps levelling past 16 with the rank pinned there.
 - A wallet must hold ≥1 monk to keep offices.
 - Monks are minted from the abbey only, max 20/wallet, and cannot be traded.
-  A monk minted mid-game earns at the wallet's current streak immediately and
-  collects nothing retroactively.
 
 ---
 

@@ -13,25 +13,18 @@
 -- One row per wallet. Monks are soulbound, so a wallet is a player for good
 -- and this row is the whole of their standing.
 --
--- `devotion` is a MONOTONIC CUMULATIVE counter of BASE devotion — the rate a
--- single monk earns. It only ever goes up. Never decrement it: every monk's
--- score is derived from it by subtraction (see below), so lowering it would
--- retroactively re-price every habit in the wallet.
+-- `devotion` is THE score — one number, the only one. It is a monotonic
+-- cumulative counter: it only ever goes up, and the level bar fills from it
+-- and from nothing else. Never decrement it.
 --
--- TOTAL devotion — the leaderboard number — is derived, never stored:
---
---     total = monk_count * devotion - bind_sum
---
--- because a monk minted when the counter stood at B has earned exactly
--- (devotion - B) since, and summing that over n monks gives the identity
--- above. `bind_sum` is the running sum of those mint-time watermarks. Both
--- move only at mint, so earning stays ONE update on ONE row no matter whether
--- a wallet holds one monk or twenty.
+-- An earning event is worth `base × streak multiplier × monk_count`. Because
+-- the monk count is applied at the moment of earning, minting a monk speeds
+-- up everything afterwards and grants nothing backwards — no watermarks, no
+-- settlement, and still one UPDATE on one row however many monks are held.
 CREATE TABLE IF NOT EXISTS players (
   wallet        TEXT PRIMARY KEY,       -- lowercase 0x-address
-  devotion      INTEGER NOT NULL DEFAULT 0,  -- cumulative BASE (per-monk) devotion
-  monk_count    INTEGER NOT NULL DEFAULT 0,
-  bind_sum      INTEGER NOT NULL DEFAULT 0,  -- Σ of each monk's mint-time watermark
+  devotion      INTEGER NOT NULL DEFAULT 0,  -- THE score
+  monk_count    INTEGER NOT NULL DEFAULT 0,  -- multiplies everything earned
   streak        INTEGER NOT NULL DEFAULT 0,
   best_streak   INTEGER NOT NULL DEFAULT 0,
   last_full_day INTEGER,                -- last game-day all three tasks were done
@@ -44,20 +37,18 @@ CREATE TABLE IF NOT EXISTS players (
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL
 );
+-- the one leaderboard sorts on this
 CREATE INDEX IF NOT EXISTS players_devotion ON players (devotion DESC);
--- the leaderboard sorts on the derived total, so index its components
-CREATE INDEX IF NOT EXISTS players_total ON players (monk_count, devotion);
 CREATE UNIQUE INDEX IF NOT EXISTS players_x_handle ON players (x_handle) WHERE x_handle IS NOT NULL;
 
 -- ── monks ──────────────────────────────────────────────────────────────────
 -- Written ONCE, at mint, and never again — monks are soulbound, so there is
--- no transfer to settle and no owner to update. This table exists only so the
--- game can list a wallet's habits and show what each one has earned; the
--- scoring maths never reads it.
+-- no transfer to settle and no owner to update. It exists so the game can
+-- list which token ids a wallet holds; the scoring maths only ever reads
+-- `players.monk_count`.
 CREATE TABLE IF NOT EXISTS monks (
   token_id  INTEGER PRIMARY KEY,
   wallet    TEXT NOT NULL,             -- the minter, forever
-  bind_mark INTEGER NOT NULL DEFAULT 0,-- players.devotion at the moment it was minted
   minted_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS monks_wallet ON monks (wallet);

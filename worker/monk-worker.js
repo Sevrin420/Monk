@@ -15,14 +15,15 @@
  *      It also deletes an entire class of backend work: no transfer
  *      settlement, no re-binding, no reconciliation.
  *
- *   2. TOTAL DEVOTION IS DERIVED, NOT STORED.
- *      `players.devotion` is a monotonic cumulative counter of BASE devotion
- *      — the rate one monk earns. A monk minted when that counter stood at B
- *      has since earned (devotion - B), so summing over a wallet's monks
- *      gives `monk_count * devotion - bind_sum`. Both components move only
- *      at mint, so earning is ONE update on ONE row whether the wallet holds
- *      one monk or twenty. New monks pick up your streak immediately and
- *      multiply everything you earn from then on.
+ *   2. THERE IS ONE SCORE, AND IT IS CALLED DEVOTION.
+ *      `players.devotion` is a single monotonic cumulative counter. An office
+ *      is worth its base value, times the streak multiplier, times HOW MANY
+ *      MONKS THE WALLET HOLDS — light the candles with two monks and it pays
+ *      20 instead of 10. The monk count is applied at the moment of earning,
+ *      which is what makes it naturally forward-only: minting a monk speeds
+ *      up everything from then on and grants nothing backwards.
+ *
+ *      Earning is one UPDATE on one row however many monks are held.
  *
  *   3. MINTS COME FROM LOGS, NOT FROM POLLING.
  *      A cron pass replays `Transfer` out of the zero address and `Referral`
@@ -273,13 +274,15 @@ function getPlayer(env, wallet) {
 }
 
 /**
- * A wallet's TOTAL devotion — the leaderboard number.
+ * What one earning event is worth.
  *
- * A monk minted when the counter stood at B has earned (devotion - B) since,
- * so the sum over n monks is n*devotion - Σ B. Both terms are maintained at
- * mint time, which is why this is arithmetic rather than a query over monks.
+ * base × streak multiplier × monks held. The per-monk value is rounded first,
+ * so the rule reads exactly as stated: each monk adds a whole office's worth.
+ * Ten devotion at a 1.5x streak with two monks is 15 each, 30 in total.
  */
-const totalDevotion = (p) => p.monk_count * p.devotion - p.bind_sum;
+function payout(base, multBp, monks) {
+  return Math.floor((base * multBp) / 10000) * Math.max(1, monks);
+}
 
 /**
  * The streak a given day belongs to, counting today as part of the run you
@@ -301,8 +304,8 @@ function streakForDay(player, day) {
  * request, a re-ingested X batch and a re-scanned block range are all safe.
  * Two concurrent callers race on the INSERT, and exactly one wins.
  */
-async function credit(env, { wallet, kind, detail, base, multBp, uniq, day }) {
-  const amount = Math.floor((base * multBp) / 10000);
+async function credit(env, { wallet, kind, detail, base, multBp, monks, uniq, day }) {
+  const amount = payout(base, multBp, monks == null ? 1 : monks);
   const t = now();
   const row = await env.DB.prepare(
     `INSERT INTO events (uniq, wallet, kind, detail, base, mult_bp, amount, day, created_at)
@@ -311,7 +314,7 @@ async function credit(env, { wallet, kind, detail, base, multBp, uniq, day }) {
      RETURNING id`,
   ).bind(uniq, wallet, kind, detail || null, base, multBp, amount, day, t).first();
 
-  if (!row) return { credited: false, amount: 0 };
+  if (!row) return { credited: false, amount: 0, multBp };
 
   const refDelta = kind === 'referral' ? amount : 0;
   await env.DB.prepare(
@@ -322,8 +325,6 @@ async function credit(env, { wallet, kind, detail, base, multBp, uniq, day }) {
   return { credited: true, amount, multBp };
 }
 
-/** One monk's devotion: everything the wallet has earned since it was minted. */
-const monkDevotion = (m, walletDevotion) => walletDevotion - m.bind_mark;
 
 /* ───────────────────────────── chain syncing ───────────────────────────── */
 
@@ -366,34 +367,32 @@ const ZERO = '0x0000000000000000000000000000000000000000';
 /**
  * Record a newly minted monk.
  *
- * The token is watermarked against its owner's cumulative counter, so it
- * earns everything the wallet earns FROM NOW ON and nothing that came before
- * — a monk bought on day 30 picks up your streak multiplier immediately, but
- * does not retroactively collect the first 29 days.
+ * All this has to do is raise `monk_count`, because the count is applied at
+ * the moment devotion is earned — so a monk minted on day 30 makes every
+ * office from day 30 onward worth more, and grants nothing backwards. There
+ * is no watermark to keep and nothing to settle.
  *
  * This is the only write to the monks table in the whole system. There is no
- * transfer path: the contract reverts on any move, so a token's owner and
- * watermark are fixed the moment it is minted.
+ * transfer path: the contract reverts on any move, so a token's owner is
+ * fixed the moment it is minted.
  *
  * `INSERT ... DO NOTHING` keyed on the token id makes a re-scanned block
- * range harmless — without it, a replay would double-count `bind_sum` and
- * silently inflate the wallet's total.
+ * range harmless — without it a replay would inflate `monk_count`, and with
+ * it every future office would pay too much.
  */
 async function recordMint(env, tokenId, owner) {
   await ensurePlayer(env, owner);
-  const player = await getPlayer(env, owner);
-  const mark = player ? player.devotion : 0;
 
   const row = await env.DB.prepare(
-    `INSERT INTO monks (token_id, wallet, bind_mark, minted_at) VALUES (?, ?, ?, ?)
+    `INSERT INTO monks (token_id, wallet, minted_at) VALUES (?, ?, ?)
      ON CONFLICT(token_id) DO NOTHING
      RETURNING token_id`,
-  ).bind(tokenId, owner, mark, now()).first();
+  ).bind(tokenId, owner, now()).first();
   if (!row) return false;
 
   await env.DB.prepare(
-    'UPDATE players SET monk_count = monk_count + 1, bind_sum = bind_sum + ?, updated_at = ? WHERE wallet = ?',
-  ).bind(mark, now(), owner).run();
+    'UPDATE players SET monk_count = monk_count + 1, updated_at = ? WHERE wallet = ?',
+  ).bind(now(), owner).run();
   return true;
 }
 
@@ -441,8 +440,11 @@ async function syncChain(env) {
             wallet: referrer,
             kind: 'referral',
             detail: `${quantity} via ${minter}`,
+            /* Flat: 20 per monk brought in, NOT multiplied by the referrer's
+               own streak or holdings. Recruiting is not practice. */
             base: REFERRAL_DEVOTION * quantity,
             multBp: 10000,
+            monks: 1,
             uniq: `ref:${log.transactionHash}:${log.logIndex}`,
             day: Math.max(0, gameDay(env)),
           });
@@ -487,37 +489,36 @@ async function routeState(env, url) {
   const player = await getPlayer(env, wallet);
   if (!player) {
     out.player = {
-      wallet, ...progressFor(0), total: 0, streak: 0, bestStreak: 0, multiplier: 1,
-      tasksToday: [], tasksDone: 0, monks: 0, monkDevotion: [], xHandle: null, refBonus: 0,
+      wallet, ...progressFor(0), streak: 0, bestStreak: 0, multiplier: 1,
+      perOffice: TASK_DEVOTION, tasksToday: [], tasksDone: 0,
+      monks: 0, tokens: [], xHandle: null, refBonus: 0,
     };
     return json(out);
   }
 
   const monks = await env.DB.prepare(
-    'SELECT token_id, bind_mark FROM monks WHERE wallet = ? ORDER BY token_id',
+    'SELECT token_id FROM monks WHERE wallet = ? ORDER BY token_id',
   ).bind(wallet).all();
 
   const mask = player.task_day === clock.day ? player.tasks_mask : 0;
   const streak = streakForDay(player, clock.day);
+  const multBp = multiplierFor(streak);
 
   out.player = {
     wallet,
-    /* `devotion` and the level are your PRACTICE — the rate one monk earns,
-       and what the rank ladder is tuned against. `total` is what the abbey
-       owes you: that practice multiplied across every habit you hold. */
+    /* One score. The level bar fills from it and nothing else. */
     ...progressFor(player.devotion),
-    total: totalDevotion(player),
     streak: player.streak,
     pendingStreak: streak,
     bestStreak: player.best_streak,
-    multiplier: multiplierFor(streak) / 10000,
+    multiplier: multBp / 10000,
+    /* What the next office is worth right now, streak and monks included —
+       so the client never has to work it out and can never disagree. */
+    perOffice: payout(TASK_DEVOTION, multBp, player.monk_count),
     tasksToday: Object.keys(TASKS).filter((t) => mask & TASKS[t]),
     tasksDone: Object.keys(TASKS).filter((t) => mask & TASKS[t]).length,
     monks: player.monk_count,
-    monkDevotion: monks.results.map((m) => ({
-      tokenId: m.token_id,
-      devotion: monkDevotion(m, player.devotion),
-    })),
+    tokens: monks.results.map((m) => m.token_id),
     xHandle: player.x_handle,
     xPending: player.x_pending,
     refBonus: player.ref_bonus,
@@ -599,26 +600,27 @@ async function routeTask(env, wallet, body) {
   const multBp = multiplierFor(streak);
   const result = await credit(env, {
     wallet, kind: 'task', detail: task,
-    base: TASK_DEVOTION, multBp,
+    base: TASK_DEVOTION, multBp, monks: held.monk_count,
     uniq: `task:${wallet}:${clock.day}:${task}`,
     day: clock.day,
   });
 
   player = await getPlayer(env, wallet);
+  const before = progressFor(player.devotion - result.amount);
+  const after = progressFor(player.devotion);
+
   return json({
     ok: true,
     task,
-    /* `gained` is per monk; `gainedTotal` is what it was actually worth,
-       across every habit in the wallet. */
-    gained: result.amount,
-    gainedTotal: result.amount * player.monk_count,
+    gained: result.amount,                                   // what it paid, all in
+    perMonk: payout(TASK_DEVOTION, multBp, 1),               // what each monk added
     monks: player.monk_count,
     multiplier: multBp / 10000,
     streak: player.streak,
+    levelledUp: after.level > before.level,
     dayComplete: player.tasks_mask === ALL_TASKS,
     tasksToday: Object.keys(TASKS).filter((k) => player.tasks_mask & TASKS[k]),
-    ...progressFor(player.devotion),
-    total: totalDevotion(player),
+    ...after,
   });
 }
 
@@ -651,52 +653,38 @@ async function routeXLink(env, wallet, body) {
   });
 }
 
-/**
- * GET /leaderboard?by=total|practice&limit=100 — cached at the edge a minute.
- *
- * `total` is the real standing: devotion multiplied across every habit held.
- * `practice` ranks the per-monk rate alone, so a devout player with one monk
- * can still be seen — the two boards answer different questions.
- */
+/** GET /leaderboard?limit=100 — one board, ranked on devotion. */
 async function routeLeaderboard(env, url) {
-  const by = url.searchParams.get('by') === 'practice' ? 'practice' : 'total';
   const limit = Math.min(200, Math.max(1, parseInt(url.searchParams.get('limit') || '100', 10)));
 
-  const order = by === 'practice'
-    ? 'p.devotion DESC, p.wallet ASC'
-    : 'total DESC, p.devotion DESC, p.wallet ASC';
-
   const rows = await env.DB.prepare(
-    `SELECT p.wallet, p.devotion, p.streak, p.best_streak, p.monk_count,
-            (p.monk_count * p.devotion - p.bind_sum) AS total
-       FROM players p
-      WHERE p.devotion > 0
-      ORDER BY ${order}
+    `SELECT wallet, devotion, streak, best_streak, monk_count
+       FROM players
+      WHERE devotion > 0
+      ORDER BY devotion DESC, wallet ASC
       LIMIT ?`,
   ).bind(limit).all();
 
   return json({
-    by,
     entries: rows.results.map((r, i) => ({
-      rank: i + 1, wallet: r.wallet,
-      devotion: r.devotion, total: r.total,
+      rank: i + 1, wallet: r.wallet, devotion: r.devotion,
       streak: r.streak, bestStreak: r.best_streak, monks: r.monk_count,
       ...progressFor(r.devotion),
     })),
   });
 }
 
-/** GET /monk/:id — one habit's standing. */
+/** GET /monk/:id — who holds this habit, and how they stand. */
 async function routeMonk(env, tokenId) {
   const row = await env.DB.prepare(
-    `SELECT m.token_id, m.wallet, (p.devotion - m.bind_mark) AS devotion, m.minted_at
+    `SELECT m.token_id, m.wallet, m.minted_at, p.devotion, p.monk_count
        FROM monks m JOIN players p ON p.wallet = m.wallet
       WHERE m.token_id = ?`,
   ).bind(tokenId).first();
   if (!row) return fail('unknown monk', 404);
   return json({
-    tokenId: row.token_id, wallet: row.wallet,
-    devotion: row.devotion, mintedAt: row.minted_at,
+    tokenId: row.token_id, wallet: row.wallet, mintedAt: row.minted_at,
+    holderDevotion: row.devotion, holderMonks: row.monk_count,
   });
 }
 
@@ -745,6 +733,9 @@ async function routeXIngest(env, body) {
     const res = await credit(env, {
       wallet: player.wallet, kind: 'x', detail: `${action} ${tweetId}`,
       base, multBp: multiplierFor(streakForDay(player, clock.day)),
+      /* monks multiply engagement the same way they multiply offices —
+         one rule, so there is nothing to explain twice */
+      monks: player.monk_count,
       uniq: `x:${tweetId}:${action}:${handle}`,
       day,
     });
@@ -768,9 +759,7 @@ async function routeXVerify(env, body) {
 async function routeStats(env) {
   const [players, monks, events, lastBlock, lastSync] = await Promise.all([
     env.DB.prepare(
-      `SELECT COUNT(*) AS n, SUM(devotion) AS d,
-              SUM(monk_count * devotion - bind_sum) AS total
-         FROM players`,
+      'SELECT COUNT(*) AS n, SUM(devotion) AS d, SUM(monk_count) AS held FROM players',
     ).first(),
     env.DB.prepare('SELECT COUNT(*) AS n FROM monks').first(),
     env.DB.prepare('SELECT COUNT(*) AS n FROM events').first(),
@@ -779,7 +768,7 @@ async function routeStats(env) {
   ]);
   return json({
     clock: dayState(env),
-    players: players.n, devotion: players.d || 0, total: players.total || 0,
+    players: players.n, devotion: players.d || 0, held: players.held || 0,
     monks: monks.n, events: events.n,
     lastBlock: lastBlock ? parseInt(lastBlock, 10) : null,
     lastSync: lastSync ? parseInt(lastSync, 10) : null,
@@ -852,5 +841,5 @@ export default {
 
 export {
   levelFor, levelFloor, multiplierFor, streakForDay, progressFor,
-  recoverSigner, rankFor, totalDevotion, monkDevotion,
+  recoverSigner, rankFor, payout,
 };

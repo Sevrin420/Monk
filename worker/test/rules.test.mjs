@@ -12,7 +12,7 @@ import { keccak_256 } from '@noble/hashes/sha3';
 
 import {
   levelFor, levelFloor, multiplierFor, streakForDay, progressFor, recoverSigner, rankFor,
-  totalDevotion, monkDevotion,
+  payout,
 } from '../monk-worker.js';
 
 const hex = (b) => '0x' + [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
@@ -99,65 +99,45 @@ test('today counts toward the run you are building', () => {
   assert.equal(streakForDay({ last_full_day: null, streak: 0 }, 3), 1);
 });
 
-/* ── the derived-total identity ──
-   `total = monk_count*devotion - bind_sum` replaces summing over the monks
-   table. If it ever drifts from the literal sum, every score in the game is
-   wrong, so check it against the brute-force definition. */
+/* ── the one thing every score in the game is built from ── */
 
-/** The literal thing the identity is standing in for. */
-function bruteForceTotal(devotion, marks) {
-  return marks.reduce((sum, m) => sum + (devotion - m), 0);
-}
-/** Mint `n` monks into a wallet whose counter currently reads `devotion`. */
-function mintInto(p, n, marks) {
-  for (let i = 0; i < n; i++) {
-    marks.push(p.devotion);
-    p.monk_count += 1;
-    p.bind_sum += p.devotion;
-  }
-}
-
-test('total devotion matches summing every monk by hand', () => {
-  const p = { devotion: 0, monk_count: 0, bind_sum: 0 };
-  const marks = [];
-
-  mintInto(p, 3, marks);                        // three monks on day one
-  assert.equal(totalDevotion(p), 0);
-
-  p.devotion += 30;                             // a full day of offices
-  assert.equal(totalDevotion(p), 90);           // 3 monks x 30
-  assert.equal(totalDevotion(p), bruteForceTotal(p.devotion, marks));
-
-  mintInto(p, 2, marks);                        // two more, mid-game
-  assert.equal(totalDevotion(p), 90);           // they collect nothing backwards
-  assert.equal(totalDevotion(p), bruteForceTotal(p.devotion, marks));
-
-  p.devotion += 45;                             // a 1.5x day
-  assert.equal(totalDevotion(p), 90 + 5 * 45);  // now all five earn
-  assert.equal(totalDevotion(p), bruteForceTotal(p.devotion, marks));
+test('each monk adds a whole office to the payout', () => {
+  // The rule as the player is told it: light candles with one monk = 10,
+  // with two = 20, and so on.
+  assert.equal(payout(10, 10000, 1), 10);
+  assert.equal(payout(10, 10000, 2), 20);
+  assert.equal(payout(10, 10000, 5), 50);
+  assert.equal(payout(10, 10000, 20), 200);
 });
 
-test('the identity holds across a long randomised run', () => {
-  let seed = 12345;
-  const rnd = (n) => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) % n);
-  const p = { devotion: 0, monk_count: 0, bind_sum: 0 };
-  const marks = [];
-
-  for (let day = 0; day < 56; day++) {
-    if (marks.length < 20 && rnd(4) === 0) mintInto(p, 1 + rnd(3), marks);
-    p.devotion += 30 * (1 + rnd(3));
-    assert.equal(totalDevotion(p), bruteForceTotal(p.devotion, marks), `day ${day}`);
-  }
-  assert.ok(p.monk_count <= 22);
+test('streak and monks stack', () => {
+  assert.equal(payout(10, 15000, 1), 15);      // 1.5x, one monk
+  assert.equal(payout(10, 15000, 2), 30);      // 1.5x, two monks
+  assert.equal(payout(10, 30000, 20), 600);    // 3x, a full house
+  // X engagement rides the same rule
+  assert.equal(payout(5, 20000, 3), 30);       // a repost at 2x with three monks
 });
 
-test('a monk minted later earns only from its own mint onward', () => {
-  const early = { bind_mark: 0 }, late = { bind_mark: 500 };
-  assert.equal(monkDevotion(early, 800), 800);
-  assert.equal(monkDevotion(late, 800), 300);
-  // and the late one immediately earns at the wallet's rate, not a reduced one
-  assert.equal(monkDevotion(late, 900) - monkDevotion(late, 800), 100);
-  assert.equal(monkDevotion(early, 900) - monkDevotion(early, 800), 100);
+test('a wallet holding nothing is never paid less than one monk', () => {
+  // Offices are gated on holding a monk, so this only guards against a zero
+  // slipping in and silently zeroing someone's earnings.
+  assert.equal(payout(10, 10000, 0), 10);
+});
+
+test('the per-monk value is rounded before multiplying, not after', () => {
+  // Otherwise 3 monks at a 1.5x streak would pay a fractional amount each,
+  // and the number on screen would not be a whole multiple of the office.
+  const each = payout(10, 15000, 1);
+  assert.equal(payout(10, 15000, 3), each * 3);
+});
+
+test('minting mid-game changes what comes next, never what came before', () => {
+  // Devotion already banked is a number; raising monk_count cannot reach it.
+  let devotion = 500;
+  devotion += payout(10, 10000, 1);            // one monk
+  assert.equal(devotion, 510);
+  devotion += payout(10, 10000, 4);            // three more minted
+  assert.equal(devotion, 550);                 // the 500 is untouched
 });
 
 test('a perfect 56 days lands where the curve intends', () => {

@@ -41,7 +41,15 @@ async function api(path, { method = 'GET', body, token } = {}) {
     },
     body: body ? JSON.stringify(body) : undefined,
   });
-  return { status: res.status, body: await res.json() };
+  const text = await res.text();
+  try {
+    return { status: res.status, body: JSON.parse(text) };
+  } catch {
+    // wrangler serves an HTML error page while it is reloading — say so
+    // plainly rather than dying on a JSON parse error 40 frames deep
+    throw new Error(`${method} ${path} returned ${res.status}, not JSON:\n`
+      + text.slice(0, 300));
+  }
 }
 
 /**
@@ -58,12 +66,8 @@ const sql = (statement) => db.exec(statement);
 function mintMonk(tokenId, wallet) {
   sql(`INSERT INTO players (wallet, created_at, updated_at) VALUES ('${wallet}',0,0)
        ON CONFLICT(wallet) DO NOTHING`);
-  sql(`INSERT INTO monks (token_id, wallet, bind_mark, minted_at)
-       SELECT ${tokenId}, '${wallet}', devotion, 0 FROM players WHERE wallet='${wallet}'`);
-  sql(`UPDATE players
-          SET monk_count = monk_count + 1,
-              bind_sum = bind_sum + (SELECT bind_mark FROM monks WHERE token_id=${tokenId})
-        WHERE wallet='${wallet}'`);
+  sql(`INSERT INTO monks (token_id, wallet, minted_at) VALUES (${tokenId}, '${wallet}', 0)`);
+  sql(`UPDATE players SET monk_count = monk_count + 1 WHERE wallet='${wallet}'`);
 }
 
 let failures = 0;
@@ -110,15 +114,20 @@ mintMonk(1, alice.wallet);
 mintMonk(2, alice.wallet);
 
 let last;
+const levelUps = [];
 for (const task of ['confess', 'pray', 'candles']) {
   const { status, body } = await api('/task', { method: 'POST', token: alice.token, body: { task } });
-  check(`office kept: ${task}`, status === 200 && body.gained === 10, body);
+  // two monks held, so each office pays 10 x 2
+  check(`office kept: ${task} pays 20 with two monks`, status === 200 && body.gained === 20, body);
+  check(`  and reports 10 per monk`, body.perMonk === 10, body.perMonk);
+  if (body.levelledUp) levelUps.push(body.level);
   last = body;
 }
 check('three offices complete the day', last.dayComplete === true, last);
-check('30 devotion for a full day', last.devotion === 30, last.devotion);
-check('two monks make the day worth 60', last.total === 60, last.total);
-check('a full day is level 2', last.level === 2 && last.rank === 'Novice', last);
+check('a full day with two monks is 60 devotion', last.devotion === 60, last.devotion);
+// level 2 starts at 30 devotion, so the bar fills during the second office
+check('the bar filled and levelled once on the way', levelUps.length === 1 && levelUps[0] === 2, levelUps);
+check('60 devotion sits inside level 2', last.level === 2 && last.intoLevel === 30, last);
 check('streak advanced to 1', last.streak === 1, last.streak);
 
 {
@@ -150,7 +159,8 @@ check('streak advanced to 1', last.streak === 1, last.streak);
     ] },
   });
   check('a replayed X action pays nothing', r2.body.skipped === 1, r2.body);
-  check('retweet + like pay 5 + 2', r2.body.devotion === 7, r2.body);
+  // monks multiply engagement exactly as they multiply offices: (5 + 2) x 2
+  check('retweet + like pay (5 + 2) x two monks', r2.body.devotion === 14, r2.body);
 }
 
 {
@@ -158,57 +168,67 @@ check('streak advanced to 1', last.streak === 1, last.streak);
   check('admin routes need the key', status === 401, status);
 }
 
-// 30 offices + 3 comment + 5 retweet + 2 like = 40
+// (3 offices x 10 + comment 3 + retweet 5 + like 2) x 2 monks = 80
 const { body: state } = await api(`/state?wallet=${alice.wallet}`);
-check('devotion totals 40', state.player.devotion === 40, state.player.devotion);
+check('devotion is one number, totalling 80', state.player.devotion === 80, state.player.devotion);
 check('both monks are counted', state.player.monks === 2, state.player.monks);
-check('each monk earns the full wallet devotion',
-  state.player.monkDevotion.every((m) => m.devotion === 40), state.player.monkDevotion);
+check('the token ids are listed', JSON.stringify(state.player.tokens) === '[1,2]', state.player.tokens);
+check('the next office is priced with monks included',
+  state.player.perOffice === 20, state.player.perOffice);
 
 // ── minting mid-game ──
-// A monk minted now must pick up the streak IMMEDIATELY, but must not
-// collect anything the wallet earned before it existed. This is the whole
-// reason monks are soulbound rather than tradeable.
+// A new monk must raise what EVERY LATER office pays, and change nothing
+// about the devotion already banked.
 {
   mintMonk(3, alice.wallet);
+  mintMonk(4, alice.wallet);
 
   const { body: s } = await api(`/state?wallet=${alice.wallet}`);
-  check('the new monk is counted', s.player.monks === 3, s.player.monks);
-  check('minting adds nothing backwards', s.player.total === 80, s.player.total);
+  check('the new monks are counted', s.player.monks === 4, s.player.monks);
+  check('minting adds nothing backwards', s.player.devotion === 80, s.player.devotion);
+  check('but the next office is now worth twice as much',
+    s.player.perOffice === 40, s.player.perOffice);
 
-  const { body: m3 } = await api('/monk/3');
-  check('a freshly minted monk starts at zero', m3.devotion === 0, m3);
+  // Alice has kept all three offices today, so she cannot demonstrate the new
+  // rate until tomorrow — and winding her day back would only prove the
+  // idempotency key stops a replay. A fresh wallet holding four shows it now.
+  const carol = await signIn('carol with four habits');
+  for (const id of [5, 6, 7, 8]) mintMonk(id, carol.wallet);
 
-  // Everything earned from here is worth 3x what one monk would earn.
-  sql(`UPDATE players SET devotion = devotion + 100 WHERE wallet='${alice.wallet}'`);
-  const { body: after } = await api(`/state?wallet=${alice.wallet}`);
-  check('the new monk earns at the full rate at once', after.player.total === 380, after.player.total);
+  const { body: t } = await api('/task', { method: 'POST', token: carol.token, body: { task: 'pray' } });
+  check('an office with four monks pays 40', t.gained === 40, t.gained);
+  check('  still 10 per monk', t.perMonk === 10, t.perMonk);
+  check('  and lands as one number', t.devotion === 40, t.devotion);
+}
 
-  const { body: m1 } = await api('/monk/1');
-  const { body: m3b } = await api('/monk/3');
-  check('the old monk holds its full history', m1.devotion === 140, m1);
-  check('the new monk holds only what came after it', m3b.devotion === 100, m3b);
-  check('the derived total equals the sum of its monks',
-    after.player.total === after.player.monkDevotion.reduce((a, m) => a + m.devotion, 0),
-    { total: after.player.total, monks: after.player.monkDevotion });
+// The idempotency key is what really stops a replayed day, not the task mask.
+{
+  sql(`UPDATE players SET tasks_mask = 0 WHERE wallet='${alice.wallet}'`);
+  const { status, body } = await api('/task', { method: 'POST', token: alice.token, body: { task: 'pray' } });
+  check('an office already paid today cannot be re-earned by clearing the mask',
+    body.gained === 0 || status !== 200, { status, gained: body.gained });
+  const { body: s } = await api(`/state?wallet=${alice.wallet}`);
+  check('  and devotion did not move', s.player.devotion === 80, s.player.devotion);
 }
 
 // A monk cannot be moved — nothing in the API exposes a transfer, and the
 // contract reverts on one. Bob, who minted nothing, stays empty.
 {
   const { body: b } = await api(`/state?wallet=${bob.wallet}`);
-  check('a wallet that never minted holds nothing', b.player.monks === 0 && b.player.total === 0, b.player);
+  check('a wallet that never minted holds nothing',
+    b.player.monks === 0 && b.player.devotion === 0, b.player);
   const { status } = await api('/task', { method: 'POST', token: bob.token, body: { task: 'pray' } });
   check('and still cannot keep the offices', status === 403, status);
 }
 
-// Leaderboards.
+// One leaderboard, on the one score.
 {
-  const { body } = await api('/leaderboard?by=total');
-  check('total leaderboard ranks alice first', body.entries[0].wallet === alice.wallet, body.entries[0]);
-  check('total leaderboard reports the multiplied score', body.entries[0].total === 380, body.entries[0]);
-  const { body: pr } = await api('/leaderboard?by=practice');
-  check('practice leaderboard reports the per-monk rate', pr.entries[0].devotion === 140, pr.entries[0]);
+  const { body } = await api('/leaderboard');
+  check('leaderboard ranks alice first', body.entries[0].wallet === alice.wallet, body.entries[0]);
+  check('leaderboard reports the one score and monks held',
+    body.entries[0].devotion === 80 && body.entries[0].monks === 4, body.entries[0]);
+  check('and carol is behind her on 40',
+    body.entries[1] && body.entries[1].devotion === 40, body.entries[1]);
 }
 
 console.log(failures ? `\n${failures} check(s) failed` : '\nall checks passed');

@@ -10,21 +10,28 @@ the front, wait for the title card, press A, and you are in the cloister.
 
 ## The game in one paragraph
 
-Three offices a day — **Confess**, **Pray**, **Light Candles** — 10 devotion
-each. Keep all three and the day counts toward a streak, and streaks multiply
-everything you earn afterwards. Engaging with the Monk X account pays too.
-Every Monk NFT in your wallet earns the full devotion that wallet earns, so
-holding twenty is twenty times the yield with no extra clicking. The game runs
-56 days and you can join at any point before it ends.
+There is **one score, and it is called Devotion.** The bar fills as you earn it;
+when it fills, you level up.
+
+Three offices a day — **Confess**, **Pray**, **Light Candles**. Each is worth
+10 devotion **per monk you hold**: light the candles with one monk for 10, with
+two for 20, with twenty for 200. Keep all three offices in a day and the day
+counts toward a streak, and streaks multiply everything on top. Engaging with
+the Monk X account pays the same way. The game runs 56 days and you can join at
+any point before it ends.
+
+```
+an office = 10  ×  streak multiplier  ×  monks held
+```
 
 | | |
 |---|---|
 | Chain | Robinhood Chain (4663) — Arbitrum Orbit L2, ETH for gas |
 | Mint | 0.01 ETH, max 20 per wallet — **from the abbey only** |
-| Offices | 3/day × 10 devotion |
+| Offices | 3/day × 10 devotion **per monk** |
 | Streaks | 7d ×1.5 · 14d ×2 · 21d ×2.5 · 28d ×3 |
-| X engagement | like 2 · comment 3 · repost 5 |
-| Referrals | 20 devotion per Monk minted through your link |
+| X engagement | like 2 · comment 3 · repost 5 — also × streak × monks |
+| Referrals | 20 per Monk minted through your link — flat, no multipliers |
 | Length | 56 days |
 
 ---
@@ -41,8 +48,8 @@ and then buy up cheap habits from lapsed players, instantly applying a 3× multi
 to tokens that were earning nothing. Soulbinding closes that arbitrage
 completely, and it means the only way to hold more monks is to mint them.
 
-A monk minted mid-game **picks up your streak immediately** — it multiplies
-everything you earn from that moment — but collects nothing retroactively.
+A monk minted mid-game **raises what every later office pays, immediately** —
+and cannot reach the devotion you have already banked.
 
 ---
 
@@ -56,18 +63,12 @@ Three decisions make that possible.
 at mint. No transfer settlement, no re-binding, no reconciliation pass — the
 Worker only ever needs to learn that a mint happened.
 
-**Total devotion is derived, not stored.** `players.devotion` is a monotonic
-cumulative counter of *base* devotion — the rate one monk earns. A monk minted
-when that counter stood at `B` has since earned `devotion − B`, so summing over
-a wallet's monks collapses to arithmetic:
-
-```
-total = monk_count × devotion − bind_sum
-```
-
-Both components move **only at mint**, so earning is one `UPDATE` on one row
-whether the wallet holds one monk or twenty. The `monks` table is written once
-per token and never read by the scoring maths at all.
+**One counter, and monks are applied when devotion is earned.** Because the
+multiplier is baked into the payout at the moment of the office rather than
+derived afterwards, earning is one `UPDATE` on one row whether the wallet holds
+one monk or twenty — and it is forward-only for free, since a number already
+banked cannot be reached by raising a count. No watermarks, no settlement. The
+`monks` table is written once per token and the scoring maths never reads it.
 
 **Mints come from logs, not polling.** A cron pass every five minutes replays
 `Transfer` out of the zero address and `Referral` with a single `eth_getLogs`
@@ -181,7 +182,7 @@ block it.
 | `POST /auth/verify` | — | signature → 7-day session token |
 | `POST /task` | session | keep an office |
 | `POST /x/link` | session | claim an X handle, get a verification code |
-| `GET /leaderboard?by=total\|practice` | — | top 100, cached 60s at the edge |
+| `GET /leaderboard` | — | top 100 by devotion, cached 60s at the edge |
 | `GET /monk/:id` | — | one habit's standing |
 | `POST /admin/x/ingest` | admin | batch X engagement |
 | `POST /admin/x/verify` | admin | confirm a handle link by hand |
@@ -206,19 +207,14 @@ that reply confirms the link.
 
 ---
 
-## Levels and the two scores
+## Levels
 
-The game keeps two numbers apart on purpose:
+Devotion to reach level L is `15·L·(L−1)`. One full day of offices with a single
+monk (30) is exactly level 2. Ranks run Postulant → Abbot, one per level.
 
-- **Devotion (practice)** — what one monk earns. Drives your level and rank.
-- **Total** — that practice across every habit you hold. Drives the leaderboard.
-
-Devotion to reach level L is `15·L·(L−1)`. One full day of offices (30) is
-exactly level 2. Ranks run Postulant → Abbot, one per level, and the ladder is
-tuned against the clock: keeping all three offices every single day for 56 days
-lands on **exactly level 16**, so a perfect run — or a shorter one paid for
-with X engagement and referrals — dies an Abbot.
-
-Because rank follows practice rather than total, holding twenty monks multiplies
-your yield without buying you a rank. Taking more habits is a yield decision,
-not a status one.
+The ladder is tuned against the clock for a **one-monk** player: keeping all
+three offices every single day for 56 days lands on exactly level 16, so a
+perfect solo run dies an Abbot. Holding more monks fills the bar proportionally
+faster — that is the point of holding them — so a twenty-monk wallet reaches
+Abbot within the first fortnight and keeps levelling past 16 with the rank
+pinned at the top of the ladder.
