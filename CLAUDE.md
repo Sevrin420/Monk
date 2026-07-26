@@ -18,7 +18,7 @@ new backend origin, add it to `connect-src` or the browser will silently block
 the call:
 
 ```html
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; connect-src 'self' https://mainnet.base.org https://monk.severin20.workers.dev; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; frame-src 'none'; object-src 'none'; base-uri 'self';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; connect-src 'self' https://rpc.mainnet.chain.robinhood.com https://monk.severin20.workers.dev; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; frame-src 'none'; object-src 'none'; base-uri 'self';">
 ```
 
 ---
@@ -61,6 +61,32 @@ the menus.
 
 **Stack:** vanilla JS + canvas, ethers v5 (UMD), Solidity 0.8.26 + OpenZeppelin
 v5, Cloudflare Workers + D1.
+
+### Chain — Robinhood Chain
+
+| | |
+|---|---|
+| Mainnet chain ID | **4663** (`0x1237`) |
+| RPC | `https://rpc.mainnet.chain.robinhood.com` |
+| Explorer | `https://robinhoodchain.blockscout.com` (Blockscout) |
+| Gas token | ETH — so `MINT_PRICE = 0.01 ether` means what it says |
+| Stack | Arbitrum Orbit / Nitro L2, blobs to Ethereum |
+
+Two consequences that bite if forgotten:
+
+- **`evmVersion` must be `cancun`** (set in `hardhat.config.js`). OpenZeppelin
+  5.x uses `mcopy`, which needs it; the default target fails to compile.
+  Nitro has supported Cancun opcodes since ArbOS 32, so this is fine on any
+  recently launched Orbit chain — but it is the first thing to check if a
+  deploy reverts on a call rather than failing to send.
+- **Blocks are fast** (Orbit defaults to ~250ms), so `START_BLOCK` matters far
+  more than on a 2s chain. Set it to the contract's deploy block or the first
+  cron pass will crawl from genesis for days. Run
+  `.github/workflows/preflight.yml` to read the current head before deploying.
+
+The public RPC is free but rate limited. The Worker uses roughly 3 requests per
+five-minute tick (~900/day), which is nowhere near any published limit — but it
+is the design's single external dependency.
 
 ---
 
@@ -189,7 +215,11 @@ cd worker && npm test          # devotion maths + signature recovery
 
 The end-to-end suite (`worker/test/e2e.mjs`) needs a running `wrangler dev`; it
 walks a wallet through sign-in, the three offices, replay rejection, X linking
-and a secondary sale, and asserts the watermark accounting survives the sale.
+and a mid-game mint, asserting the new monk earns at full rate at once and
+collects nothing retroactively.
+
+`npx hardhat test` covers the contract, including that every route out of a
+token reverts. All three suites run in CI on push (`.github/workflows/test.yml`).
 
 Note: do NOT shell out to `wrangler d1 execute --local` while `wrangler dev` is
 running — it makes the dev server reload and drop in-flight connections. The

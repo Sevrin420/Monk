@@ -1,0 +1,114 @@
+# Check Robinhood Chain before deploying anything.
+#
+# Answers the questions the code depends on and that cannot be confirmed from
+# a dev sandbox: is the chain id what we think, does the public RPC serve
+# eth_getLogs over the 800-block range the Worker uses, how fast are blocks,
+# and does the chain support the Cancun opcodes OpenZeppelin 5.x compiles to.
+#
+# Run it from the Actions tab. It deploys NOTHING and needs no key.
+name: preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      rpc:
+        description: 'RPC URL to check'
+        default: 'https://rpc.mainnet.chain.robinhood.com'
+        required: true
+      expected_chain_id:
+        description: 'Chain id we expect (decimal)'
+        default: '4663'
+        required: true
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: check the chain
+        env:
+          RPC: ${{ inputs.rpc }}
+          EXPECTED: ${{ inputs.expected_chain_id }}
+        run: |
+          node <<'EOF'
+          const RPC = process.env.RPC;
+          const EXPECTED = Number(process.env.EXPECTED);
+          let failed = false;
+
+          const rpc = async (method, params = []) => {
+            const r = await fetch(RPC, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+            });
+            if (!r.ok) throw new Error(`${method}: HTTP ${r.status}`);
+            const j = await r.json();
+            if (j.error) throw new Error(`${method}: ${j.error.message}`);
+            return j.result;
+          };
+          const ok   = (m) => console.log(`ok   ${m}`);
+          const bad  = (m) => { failed = true; console.log(`FAIL ${m}`); };
+
+          // ── identity ──
+          const id = Number(await rpc('eth_chainId'));
+          id === EXPECTED ? ok(`chain id is ${id}`)
+                          : bad(`chain id is ${id}, expected ${EXPECTED}`);
+          try { console.log(`     client: ${await rpc('web3_clientVersion')}`); } catch {}
+
+          // ── block time: matters because START_BLOCK and the cron budget
+          //    are sized against it ──
+          const head = Number(await rpc('eth_blockNumber'));
+          console.log(`     head block: ${head}`);
+          const [a, b] = await Promise.all([
+            rpc('eth_getBlockByNumber', ['0x' + (head - 1000).toString(16), false]),
+            rpc('eth_getBlockByNumber', ['0x' + head.toString(16), false]),
+          ]);
+          const secsPerBlock = (Number(b.timestamp) - Number(a.timestamp)) / 1000;
+          console.log(`     ~${secsPerBlock.toFixed(3)}s per block`);
+          const perTick = Math.ceil(300 / secsPerBlock);
+          console.log(`     ~${perTick} blocks per 5-minute cron tick`);
+          perTick < 800 * 25
+            ? ok(`the sync budget (20,000 blocks/tick) covers it`)
+            : bad(`the sync CANNOT keep up — raise MAX_CHUNKS in monk-worker.js`);
+
+          // ── eth_getLogs over the exact range the Worker uses ──
+          try {
+            const logs = await rpc('eth_getLogs', [{
+              fromBlock: '0x' + (head - 800).toString(16),
+              toBlock: '0x' + head.toString(16),
+              topics: [['0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef']],
+            }]);
+            ok(`eth_getLogs serves an 800-block range (${logs.length} logs)`);
+          } catch (e) {
+            bad(`eth_getLogs over 800 blocks failed: ${e.message} — lower LOG_CHUNK`);
+          }
+
+          // ── Cancun opcodes: OpenZeppelin 5.x compiles `mcopy`, so a chain
+          //    without it would revert at runtime rather than fail to deploy ──
+          // PUSH1 20, PUSH1 00, PUSH1 00, MCOPY  -> copy 32 bytes mem[0]->mem[0]
+          // PUSH1 20, PUSH1 00, RETURN           -> hand those 32 bytes back
+          // On a chain without MCOPY this is an invalid opcode and throws.
+          const probe = '0x6020600060005e60206000f3';
+          try {
+            const out = await rpc('eth_call', [{ data: probe }, 'latest']);
+            out && out !== '0x'
+              ? ok('MCOPY executes — evmVersion "cancun" is safe')
+              : bad('MCOPY returned nothing — do NOT deploy with evmVersion "cancun"');
+          } catch (e) {
+            bad(`MCOPY probe reverted (${e.message}) — chain predates ArbOS 32; `
+              + 'pin an older OpenZeppelin and drop evmVersion to "shanghai"');
+          }
+
+          console.log(failed ? '\nPREFLIGHT FAILED' : '\nall preflight checks passed');
+          process.exit(failed ? 1 : 0);
+          EOF
+
+      - name: what to do next
+        if: success()
+        run: |
+          echo "Set START_BLOCK in worker/wrangler.toml to the contract's"
+          echo "deploy block before the first cron pass runs."

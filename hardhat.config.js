@@ -15,16 +15,31 @@ module.exports = {
     },
   },
   networks: {
-    base: {
-      url: process.env.BASE_RPC || 'https://mainnet.base.org',
-      chainId: 8453,
+    /* Robinhood Chain — Arbitrum Orbit (Nitro) L2, ETH for gas. */
+    robinhood: {
+      url: process.env.ROBINHOOD_RPC || 'https://rpc.mainnet.chain.robinhood.com',
+      chainId: 4663,
       accounts: KEY ? [KEY] : [],
     },
-    baseSepolia: {
-      url: process.env.BASE_SEPOLIA_RPC || 'https://sepolia.base.org',
-      chainId: 84532,
+    /* Testnet: set ROBINHOOD_TESTNET_RPC and ROBINHOOD_TESTNET_CHAIN_ID from
+       docs.robinhood.com/chain/connecting before using this — public chain
+       lists disagree on the testnet id, so it is deliberately not hardcoded. */
+    robinhoodTestnet: {
+      url: process.env.ROBINHOOD_TESTNET_RPC || 'https://rpc.testnet.chain.robinhood.com',
+      chainId: parseInt(process.env.ROBINHOOD_TESTNET_CHAIN_ID || '0', 10) || undefined,
       accounts: KEY ? [KEY] : [],
     },
   },
-  etherscan: { apiKey: { base: process.env.BASESCAN_API_KEY || '' } },
+  /* The explorer is Blockscout, which takes any non-empty key. */
+  etherscan: {
+    apiKey: { robinhood: process.env.BLOCKSCOUT_API_KEY || 'blockscout' },
+    customChains: [{
+      network: 'robinhood',
+      chainId: 4663,
+      urls: {
+        apiURL: 'https://robinhoodchain.blockscout.com/api',
+        browserURL: 'https://robinhoodchain.blockscout.com',
+      },
+    }],
+  },
 };

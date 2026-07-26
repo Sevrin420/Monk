@@ -19,6 +19,7 @@ holding twenty is twenty times the yield with no extra clicking. The game runs
 
 | | |
 |---|---|
+| Chain | Robinhood Chain (4663) — Arbitrum Orbit L2, ETH for gas |
 | Mint | 0.01 ETH, max 20 per wallet — **from the abbey only** |
 | Offices | 3/day × 10 devotion |
 | Streaks | 7d ×1.5 · 14d ×2 · 21d ×2.5 · 28d ×3 |
@@ -96,6 +97,36 @@ worker/
   test/rules.test.mjs signature recovery + the devotion maths
   test/e2e.mjs        full loop against a running `wrangler dev`
 ```
+
+---
+
+## The chain
+
+Robinhood Chain — an Arbitrum Orbit (Nitro) rollup that uses **ETH for gas**, so
+a 0.01 ETH mint means what it says.
+
+| | |
+|---|---|
+| Mainnet chain ID | 4663 (`0x1237`) |
+| RPC | `https://rpc.mainnet.chain.robinhood.com` |
+| Explorer | `https://robinhoodchain.blockscout.com` |
+
+Deployment is permissionless — no allowlist, no approval needed.
+
+Two things about this chain shape the code:
+
+- **`evmVersion` is pinned to `cancun`** in `hardhat.config.js`. OpenZeppelin
+  5.x compiles `mcopy`, which needs it. Nitro has supported Cancun opcodes
+  since ArbOS 32, so this is fine on a recently launched Orbit chain — the
+  preflight workflow probes for it rather than assuming.
+- **Blocks are ~250ms**, so `START_BLOCK` matters far more than on a 2s chain.
+  Set it to the contract's deploy block or the first cron pass will crawl from
+  genesis for days.
+
+**Before deploying, run `.github/workflows/preflight.yml`** from the Actions
+tab. It deploys nothing and needs no key; it confirms the chain id, measures
+the real block time against the sync budget, checks that `eth_getLogs` serves
+the 800-block range the Worker uses, and probes MCOPY.
 
 ---
 

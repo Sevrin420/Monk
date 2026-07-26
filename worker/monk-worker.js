@@ -332,9 +332,11 @@ const TOPIC_REFERRAL = keccakHex('Referral(address,address,uint256)');
 
 /** Most public RPCs cap `eth_getLogs` at 1,000 blocks. Stay under it. */
 const LOG_CHUNK = 800;
-/** Chunks per cron pass. At a 2s block time this is ~50x more headroom than
- *  a 5-minute tick needs, so a cold or long-stalled worker catches up fast. */
-const MAX_CHUNKS = 12;
+/** Chunks per cron pass. Robinhood Chain is an Orbit rollup with ~250ms
+ *  blocks, so a five-minute tick only has to cover ~1,200 blocks — this is
+ *  ~16x that, which is the margin a cold or long-stalled worker uses to
+ *  catch back up. It is NOT enough to crawl from genesis: set START_BLOCK. */
+const MAX_CHUNKS = 25;
 
 async function rpc(env, method, params) {
   const res = await fetch(env.READ_RPC, {

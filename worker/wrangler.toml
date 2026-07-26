@@ -19,12 +19,16 @@ database_id = "REPLACE_WITH_D1_DATABASE_ID"
 # 2026-08-01T00:00:00Z — set this before you open the doors.
 GAME_START       = "1785542400"
 CONTRACT_ADDRESS = "0x0000000000000000000000000000000000000000"
-# Base mainnet: ETH-denominated, cheap enough that a 0.01 ETH mint is not
-# eaten by gas, and the public RPC is free with no key.
-READ_RPC         = "https://mainnet.base.org"
-CHAIN_ID         = "8453"
-# Block the Monk contract was deployed in — the sync starts here, so setting
-# it correctly saves the first cron pass a very long crawl.
+# Robinhood Chain — Arbitrum Orbit L2, ETH for gas, so a 0.01 ETH mint is not
+# eaten by fees. The public RPC is free with no key; we make ~3 requests per
+# five-minute tick, which is well inside its rate limit.
+READ_RPC         = "https://rpc.mainnet.chain.robinhood.com"
+CHAIN_ID         = "4663"
+# !! SET THIS BEFORE THE FIRST DEPLOY !!
+# The block the Monk contract was deployed in. Orbit blocks are ~250ms, so
+# leaving this at 0 means the first cron pass crawls millions of blocks and
+# takes days to reach the present. Run .github/workflows/preflight.yml to read
+# the current head.
 START_BLOCK      = "0"
 
 # Secrets — never commit these. Set them with:
