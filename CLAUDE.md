@@ -66,30 +66,46 @@ v5, Cloudflare Workers + D1.
 
 ## Architecture — read this before touching the Worker
 
-Two invariants carry the whole design. Breaking either one silently corrupts
+Three invariants carry the whole design. Breaking any of them silently corrupts
 scores rather than throwing, so be careful here.
 
-### 1. `players.devotion` is a MONOTONIC CUMULATIVE counter
+### 0. MONKS ARE SOULBOUND
 
-It only ever goes up. It is not "the player's current score to display" — it is
-the accumulator that **per-monk** devotion is derived from:
+The contract reverts on transfer, burn and approval — the only `Transfer` it
+can emit is a mint out of the zero address. This is a **game rule** first:
+devotion is earned by a wallet and every monk in it shares that wallet's
+streak, so tradeable monks would let a player grind a 28-day streak with one
+monk and then buy up cheap habits from lapsed players, applying 3x to tokens
+that were earning nothing. It also deletes a whole class of backend work.
+
+**Never add a transfer path.** If ownership can change, every identity below
+breaks.
+
+### 1. `players.devotion` is a MONOTONIC CUMULATIVE counter of BASE devotion
+
+It only ever goes up, and it is the rate **one** monk earns — not the score to
+display. **Never decrement it**: every monk's devotion is derived from it by
+subtraction, so lowering it retroactively re-prices every habit in the wallet.
+
+### 2. TOTAL devotion is DERIVED, never stored
 
 ```
-monk devotion = monks.accrued + (players.devotion − monks.bind_mark)
+monk devotion = players.devotion − monks.bind_mark
+total         = players.monk_count × players.devotion − players.bind_sum
 ```
 
-**Never decrement `players.devotion`.** Doing so retroactively re-prices every
-monk bound to that wallet. If you ever need to take devotion away, do it by
-adjusting `monks.accrued`, not the accumulator.
+The second line is the first summed over a wallet's monks. `monk_count` and
+`bind_sum` move **only at mint**, which is why earning is O(1): one UPDATE on
+one row whether the wallet holds one monk or twenty.
 
-This is why earning is O(1): one UPDATE on `players`, no matter whether the
-wallet holds one monk or twenty.
+A monk is watermarked at mint, so it picks up your streak immediately but
+collects nothing from before it existed. `recordMint()` is the only writer of
+`monks`, and its `ON CONFLICT DO NOTHING` is load-bearing — without it a
+re-scanned block range would double-count `bind_sum` and inflate the total.
 
-### 2. Only a TRANSFER writes to `monks`
-
-`moveMonk()` is the single writer. It settles what the monk earned under the old
-holder into `accrued`, then re-watermarks `bind_mark` against the new holder's
-current counter. Nothing on the earning path may touch this table.
+Rank and level come from `devotion` (your practice, tuned so a perfect 56 days
+is exactly Abbot); the leaderboard ranks `total`. Keeping those separate is
+what stops rank being purely pay-to-win.
 
 ### Idempotency
 
@@ -109,7 +125,9 @@ are all safe. **Any new devotion source needs a `uniq` key of its own.**
 
 `scheduled()` → `syncChain()` runs every 5 minutes. One `eth_getLogs` per
 800-block chunk pulls `Transfer` and `Referral` together (both topics in one
-`topics[0]` array), ordered by block and log index. The cursor lives in
+`topics[0]` array), ordered by block and log index. Only mints (`from == 0x0`)
+are acted on; any other `Transfer` means the deployed contract is not the one
+in this repo, and is ignored rather than trusted. The cursor lives in
 `meta.last_block`.
 
 There is no indexer and no paid RPC, on purpose.
@@ -132,7 +150,11 @@ returns. A tampered client can lie to its own screen and nowhere else.
 - Referrals: 20 per monk, **flat** (no multiplier).
 - Levels: devotion to reach level L is `15·L·(L−1)`. Ranks are one per level,
   Postulant → Abbot, tuned so a perfect 56-day run lands on exactly level 16.
+  Levels track `devotion` (practice), NOT `total` — so rank cannot be bought.
 - A wallet must hold ≥1 monk to keep offices.
+- Monks are minted from the abbey only, max 20/wallet, and cannot be traded.
+  A monk minted mid-game earns at the wallet's current streak immediately and
+  collects nothing retroactively.
 
 ---
 

@@ -7,7 +7,8 @@
  *
  * Walks a wallet through the whole loop: sign in, keep the three offices,
  * fail to keep them twice, link an X handle, get credited for engagement,
- * and confirm the per-monk watermark survives a transfer.
+ * and confirm that a monk minted mid-game picks up the streak immediately
+ * without collecting anything backwards.
  */
 import { secp256k1 } from '@noble/curves/secp256k1';
 import { keccak_256 } from '@noble/hashes/sha3';
@@ -53,6 +54,18 @@ if (!D1_FILE) throw new Error('no local D1 file — run the schema step first');
 const db = new DatabaseSync(D1_FILE);
 const sql = (statement) => db.exec(statement);
 
+/** Exactly what recordMint() does when the cron sees a mint log. */
+function mintMonk(tokenId, wallet) {
+  sql(`INSERT INTO players (wallet, created_at, updated_at) VALUES ('${wallet}',0,0)
+       ON CONFLICT(wallet) DO NOTHING`);
+  sql(`INSERT INTO monks (token_id, wallet, bind_mark, minted_at)
+       SELECT ${tokenId}, '${wallet}', devotion, 0 FROM players WHERE wallet='${wallet}'`);
+  sql(`UPDATE players
+          SET monk_count = monk_count + 1,
+              bind_sum = bind_sum + (SELECT bind_mark FROM monks WHERE token_id=${tokenId})
+        WHERE wallet='${wallet}'`);
+}
+
 let failures = 0;
 function check(label, cond, detail) {
   const mark = cond ? 'ok  ' : 'FAIL';
@@ -93,8 +106,8 @@ check('wallet signs in', !!alice.token);
 }
 
 // Give alice two monks and bob none (standing in for the chain sync).
-sql(`INSERT INTO monks (token_id, wallet, bind_mark, accrued, updated_at)
-     VALUES (1,'${alice.wallet}',0,0,0),(2,'${alice.wallet}',0,0,0)`);
+mintMonk(1, alice.wallet);
+mintMonk(2, alice.wallet);
 
 let last;
 for (const task of ['confess', 'pray', 'candles']) {
@@ -104,6 +117,7 @@ for (const task of ['confess', 'pray', 'candles']) {
 }
 check('three offices complete the day', last.dayComplete === true, last);
 check('30 devotion for a full day', last.devotion === 30, last.devotion);
+check('two monks make the day worth 60', last.total === 60, last.total);
 check('a full day is level 2', last.level === 2 && last.rank === 'Novice', last);
 check('streak advanced to 1', last.streak === 1, last.streak);
 
@@ -151,33 +165,50 @@ check('both monks are counted', state.player.monks === 2, state.player.monks);
 check('each monk earns the full wallet devotion',
   state.player.monkDevotion.every((m) => m.devotion === 40), state.player.monkDevotion);
 
-// The transfer path: monk #2 goes to bob, who has earned nothing yet.
-// It must keep the 40 it earned under alice and earn nothing retroactively.
+// ── minting mid-game ──
+// A monk minted now must pick up the streak IMMEDIATELY, but must not
+// collect anything the wallet earned before it existed. This is the whole
+// reason monks are soulbound rather than tradeable.
 {
-  const { body: before } = await api('/monk/2');
-  check('monk 2 holds 40 before the sale', before.devotion === 40, before);
+  mintMonk(3, alice.wallet);
 
-  sql(`UPDATE monks SET wallet='${bob.wallet}', accrued=accrued+40, bind_mark=0 WHERE token_id=2`);
-  sql(`INSERT INTO players (wallet, created_at, updated_at) VALUES ('${bob.wallet}',0,0)
-       ON CONFLICT(wallet) DO NOTHING`);
+  const { body: s } = await api(`/state?wallet=${alice.wallet}`);
+  check('the new monk is counted', s.player.monks === 3, s.player.monks);
+  check('minting adds nothing backwards', s.player.total === 80, s.player.total);
 
-  const { body: after } = await api('/monk/2');
-  check('a sold monk keeps what it earned', after.devotion === 40 && after.wallet === bob.wallet, after);
+  const { body: m3 } = await api('/monk/3');
+  check('a freshly minted monk starts at zero', m3.devotion === 0, m3);
 
-  // Alice earns more; her remaining monk gains, the sold one does not.
+  // Everything earned from here is worth 3x what one monk would earn.
   sql(`UPDATE players SET devotion = devotion + 100 WHERE wallet='${alice.wallet}'`);
+  const { body: after } = await api(`/state?wallet=${alice.wallet}`);
+  check('the new monk earns at the full rate at once', after.player.total === 380, after.player.total);
+
   const { body: m1 } = await api('/monk/1');
-  const { body: m2 } = await api('/monk/2');
-  check('the kept monk gains', m1.devotion === 140, m1);
-  check('the sold monk does not gain from its old wallet', m2.devotion === 40, m2);
+  const { body: m3b } = await api('/monk/3');
+  check('the old monk holds its full history', m1.devotion === 140, m1);
+  check('the new monk holds only what came after it', m3b.devotion === 100, m3b);
+  check('the derived total equals the sum of its monks',
+    after.player.total === after.player.monkDevotion.reduce((a, m) => a + m.devotion, 0),
+    { total: after.player.total, monks: after.player.monkDevotion });
+}
+
+// A monk cannot be moved — nothing in the API exposes a transfer, and the
+// contract reverts on one. Bob, who minted nothing, stays empty.
+{
+  const { body: b } = await api(`/state?wallet=${bob.wallet}`);
+  check('a wallet that never minted holds nothing', b.player.monks === 0 && b.player.total === 0, b.player);
+  const { status } = await api('/task', { method: 'POST', token: bob.token, body: { task: 'pray' } });
+  check('and still cannot keep the offices', status === 403, status);
 }
 
 // Leaderboards.
 {
-  const { body } = await api('/leaderboard?by=wallet');
-  check('wallet leaderboard ranks alice first', body.entries[0].wallet === alice.wallet, body.entries[0]);
-  const { body: m } = await api('/leaderboard?by=monk');
-  check('monk leaderboard ranks monk 1 first', m.entries[0].tokenId === 1, m.entries[0]);
+  const { body } = await api('/leaderboard?by=total');
+  check('total leaderboard ranks alice first', body.entries[0].wallet === alice.wallet, body.entries[0]);
+  check('total leaderboard reports the multiplied score', body.entries[0].total === 380, body.entries[0]);
+  const { body: pr } = await api('/leaderboard?by=practice');
+  check('practice leaderboard reports the per-monk rate', pr.entries[0].devotion === 140, pr.entries[0]);
 }
 
 console.log(failures ? `\n${failures} check(s) failed` : '\nall checks passed');

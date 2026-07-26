@@ -7,17 +7,25 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 /**
  * MONK — the abbey, 1200 AD.
  *
- * A deliberately small ERC-721. All game state (devotion, streaks, levels)
- * lives off-chain in the Cloudflare Worker; the chain only answers two
- * questions, and it answers them for free over `eth_getLogs`:
+ * A SOULBOUND ERC-721. A habit is given, never sold on: once minted, a Monk
+ * cannot be transferred, approved or burned. Want more monks? Take them from
+ * the abbey.
  *
- *   1. who holds which Monk right now   → Transfer events
- *   2. who referred a mint              → Referral events
+ * That is a game-design decision before it is a technical one. Devotion is
+ * earned by a WALLET and every Monk in it shares that wallet's streak, so if
+ * monks were tradeable a player could grind a 28-day streak with one monk and
+ * then buy up cheap monks from lapsed players — instantly applying a 3x
+ * multiplier to habits that were earning nothing. Soulbinding closes that
+ * arbitrage completely, and it means the only way to hold more monks is to
+ * mint them.
  *
- * The Worker replays those two logs and needs nothing else — no indexer, no
- * archive node, no paid subscription. That is the whole reason this contract
- * emits `Referral` rather than storing referrers in a mapping: a mapping would
- * force the Worker to poll per-wallet, a log lets it sync the world in one call.
+ * It also shrinks the backend to almost nothing. With no transfers there is
+ * no ownership to track: the Worker only ever needs to learn that a mint
+ * happened, which it reads from `Transfer` logs out of the zero address.
+ *
+ * Chain reads the Worker relies on, both free over `eth_getLogs`:
+ *   1. Transfer(0x0 → owner)  — a mint
+ *   2. Referral               — who sent the minter
  */
 contract Monk is ERC721, Ownable {
     uint256 public constant MINT_PRICE = 0.01 ether;
@@ -35,6 +43,8 @@ contract Monk is ERC721, Ownable {
     event Referral(address indexed referrer, address indexed minter, uint256 quantity);
     event MintOpenSet(bool open);
     event MaxSupplySet(uint256 maxSupply);
+
+    error Soulbound();
 
     constructor(string memory baseURI_, address owner_) ERC721("Monk", "MONK") Ownable(owner_) {
         _base = baseURI_;
@@ -73,11 +83,36 @@ contract Monk is ERC721, Ownable {
         if (referrer != address(0)) emit Referral(referrer, msg.sender, quantity);
     }
 
+    // ─────────────────────────── soulbound ───────────────────────────
+
+    /**
+     * The single chokepoint every mint, transfer and burn passes through.
+     * Minting has no previous owner, so it is the only case allowed; a
+     * transfer or a burn both arrive here with `from != 0` and revert.
+     */
+    function _update(address to, uint256 tokenId, address auth)
+        internal
+        override
+        returns (address)
+    {
+        if (_ownerOf(tokenId) != address(0)) revert Soulbound();
+        return super._update(to, tokenId, auth);
+    }
+
+    /// Approvals are refused outright, so a Monk can never even be listed.
+    function approve(address, uint256) public pure override {
+        revert Soulbound();
+    }
+
+    function setApprovalForAll(address, bool) public pure override {
+        revert Soulbound();
+    }
+
     // ─────────────────────────── views ───────────────────────────
 
     /**
      * Every token a wallet holds. O(totalMinted) — never call this on-chain,
-     * it exists for the Worker's reconciliation pass and for wallet UIs.
+     * it exists for wallet UIs and for the Worker's reconciliation pass.
      */
     function tokensOfOwner(address owner_) external view returns (uint256[] memory ids) {
         uint256 n = balanceOf(owner_);

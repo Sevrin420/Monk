@@ -3,24 +3,31 @@
  *
  * One Cloudflare Worker, one D1 database, one cron trigger. No Durable
  * Objects, no queues, no indexer, no paid RPC. It is built to sit inside the
- * free tier at a few thousand daily players, and the two design choices that
- * make that true are worth stating up front:
+ * free tier at a few thousand daily players, and three design choices make
+ * that true:
  *
- *   1. DEVOTION IS AN ACCUMULATOR, NOT A LEDGER PER MONK.
- *      A monk earns whatever its holder earns while it sits in that wallet.
- *      Done naively, a wallet with 20 monks costs 20 row-writes per task. So
- *      `players.devotion` is a monotonic cumulative counter, and each monk
- *      stores a watermark into it (`bind_mark`). A monk's real devotion is
- *      `accrued + (holder.devotion - bind_mark)`. Earning is one UPDATE
- *      regardless of how many monks you hold; only a TRANSFER touches the
- *      monks table. This is the staking-index trick, applied to devotion.
+ *   1. MONKS ARE SOULBOUND, SO THERE IS NO OWNERSHIP TO TRACK.
+ *      A habit is minted from the abbey and stays put. That is a game rule
+ *      first — devotion is earned by a WALLET and every monk in it shares
+ *      that wallet's streak, so tradeable monks would let a player grind a
+ *      28-day streak with one monk and then buy up cheap habits from lapsed
+ *      players, instantly applying 3x to tokens that were earning nothing.
+ *      It also deletes an entire class of backend work: no transfer
+ *      settlement, no re-binding, no reconciliation.
  *
- *   2. OWNERSHIP COMES FROM LOGS, NOT FROM POLLING.
- *      A cron pass replays `Transfer` and `Referral` from the Monk contract
- *      with a single `eth_getLogs` per chunk against a public RPC. Secondary
- *      sales, transfers and mints all land through the same path, so a monk
- *      bought on a marketplace starts earning within one cron tick without
- *      anyone telling us about it.
+ *   2. TOTAL DEVOTION IS DERIVED, NOT STORED.
+ *      `players.devotion` is a monotonic cumulative counter of BASE devotion
+ *      — the rate one monk earns. A monk minted when that counter stood at B
+ *      has since earned (devotion - B), so summing over a wallet's monks
+ *      gives `monk_count * devotion - bind_sum`. Both components move only
+ *      at mint, so earning is ONE update on ONE row whether the wallet holds
+ *      one monk or twenty. New monks pick up your streak immediately and
+ *      multiply everything you earn from then on.
+ *
+ *   3. MINTS COME FROM LOGS, NOT FROM POLLING.
+ *      A cron pass replays `Transfer` out of the zero address and `Referral`
+ *      with a single `eth_getLogs` per chunk against a free public RPC. It is
+ *      the only thing that watches the chain.
  *
  * Bindings (wrangler.toml):
  *   DB               D1 database
@@ -265,10 +272,14 @@ function getPlayer(env, wallet) {
   return env.DB.prepare('SELECT * FROM players WHERE wallet = ?').bind(wallet).first();
 }
 
-function countMonks(env, wallet) {
-  return env.DB.prepare('SELECT COUNT(*) AS n FROM monks WHERE wallet = ?')
-    .bind(wallet).first().then((r) => (r ? r.n : 0));
-}
+/**
+ * A wallet's TOTAL devotion — the leaderboard number.
+ *
+ * A monk minted when the counter stood at B has earned (devotion - B) since,
+ * so the sum over n monks is n*devotion - Σ B. Both terms are maintained at
+ * mint time, which is why this is arithmetic rather than a query over monks.
+ */
+const totalDevotion = (p) => p.monk_count * p.devotion - p.bind_sum;
 
 /**
  * The streak a given day belongs to, counting today as part of the run you
@@ -311,8 +322,8 @@ async function credit(env, { wallet, kind, detail, base, multBp, uniq, day }) {
   return { credited: true, amount, multBp };
 }
 
-/** A monk's live devotion, given its row and its holder's cumulative counter. */
-const monkDevotion = (m, holderDevotion) => m.accrued + (holderDevotion - m.bind_mark);
+/** One monk's devotion: everything the wallet has earned since it was minted. */
+const monkDevotion = (m, walletDevotion) => walletDevotion - m.bind_mark;
 
 /* ───────────────────────────── chain syncing ───────────────────────────── */
 
@@ -351,40 +362,44 @@ const addrFromTopic = (topic) => '0x' + topic.slice(-40);
 const ZERO = '0x0000000000000000000000000000000000000000';
 
 /**
- * Move a monk between wallets, settling what it earned under the old holder
- * and re-watermarking it against the new one. This is the ONLY place the
- * monks table is written, which is why holding 20 monks costs nothing extra
- * on the earning path.
+ * Record a newly minted monk.
+ *
+ * The token is watermarked against its owner's cumulative counter, so it
+ * earns everything the wallet earns FROM NOW ON and nothing that came before
+ * — a monk bought on day 30 picks up your streak multiplier immediately, but
+ * does not retroactively collect the first 29 days.
+ *
+ * This is the only write to the monks table in the whole system. There is no
+ * transfer path: the contract reverts on any move, so a token's owner and
+ * watermark are fixed the moment it is minted.
+ *
+ * `INSERT ... DO NOTHING` keyed on the token id makes a re-scanned block
+ * range harmless — without it, a replay would double-count `bind_sum` and
+ * silently inflate the wallet's total.
  */
-async function moveMonk(env, tokenId, to) {
-  const t = now();
-  await ensurePlayer(env, to);
-  const [monk, toPlayer] = await Promise.all([
-    env.DB.prepare('SELECT * FROM monks WHERE token_id = ?').bind(tokenId).first(),
-    getPlayer(env, to),
-  ]);
-  const toDevotion = toPlayer ? toPlayer.devotion : 0;
+async function recordMint(env, tokenId, owner) {
+  await ensurePlayer(env, owner);
+  const player = await getPlayer(env, owner);
+  const mark = player ? player.devotion : 0;
 
-  if (!monk) {
-    await env.DB.prepare(
-      'INSERT INTO monks (token_id, wallet, bind_mark, accrued, updated_at) VALUES (?, ?, ?, 0, ?)',
-    ).bind(tokenId, to, toDevotion, t).run();
-    return;
-  }
-  if (monk.wallet === to) return;
+  const row = await env.DB.prepare(
+    `INSERT INTO monks (token_id, wallet, bind_mark, minted_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT(token_id) DO NOTHING
+     RETURNING token_id`,
+  ).bind(tokenId, owner, mark, now()).first();
+  if (!row) return false;
 
-  const from = await getPlayer(env, monk.wallet);
-  const earnedHere = Math.max(0, (from ? from.devotion : 0) - monk.bind_mark);
   await env.DB.prepare(
-    'UPDATE monks SET wallet = ?, bind_mark = ?, accrued = accrued + ?, updated_at = ? WHERE token_id = ?',
-  ).bind(to, toDevotion, earnedHere, t, tokenId).run();
+    'UPDATE players SET monk_count = monk_count + 1, bind_sum = bind_sum + ?, updated_at = ? WHERE wallet = ?',
+  ).bind(mark, now(), owner).run();
+  return true;
 }
 
 /**
- * Replay Transfer + Referral logs from the last synced block. Both topics come
+ * Replay mint + Referral logs from the last synced block. Both topics come
  * back in one `eth_getLogs` call, already ordered by block and log index, so
- * a mint, a sale and a referral in the same block apply in the order they
- * happened on chain.
+ * a mint and its referral in the same block apply in the order they happened
+ * on chain.
  */
 async function syncChain(env) {
   if (!env.CONTRACT_ADDRESS || !env.READ_RPC) return { skipped: 'not configured' };
@@ -406,14 +421,14 @@ async function syncChain(env) {
 
     for (const log of logs) {
       if (log.topics[0] === TOPIC_TRANSFER) {
+        /* Monks are soulbound, so the only Transfer the contract can ever
+           emit is a mint out of the zero address. Anything else would mean
+           the deployed contract is not the one in this repo — ignore it
+           rather than corrupt the books. */
+        const from = norm(addrFromTopic(log.topics[1]));
         const owner = norm(addrFromTopic(log.topics[2]));
         const tokenId = parseInt(log.topics[3], 16);
-        if (owner === ZERO) {
-          // Burn: settle it where it stands and leave it out of the tally.
-          await env.DB.prepare('DELETE FROM monks WHERE token_id = ?').bind(tokenId).run();
-        } else {
-          await moveMonk(env, tokenId, owner);
-        }
+        if (from === ZERO && owner !== ZERO) await recordMint(env, tokenId, owner);
       } else {
         const referrer = norm(addrFromTopic(log.topics[1]));
         const minter = norm(addrFromTopic(log.topics[2]));
@@ -460,6 +475,9 @@ async function routeState(env, url) {
       streakTiers: STREAK_TIERS.map(([days, bp]) => ({ days, multiplier: bp / 10000 })),
       maxPerWallet: 20,
       mintPrice: '0.01',
+      /* Habits come from the abbey and stay put — there is no secondary
+         market to arbitrage a streak onto. */
+      soulbound: true,
     },
   };
   if (!wallet) return json(out);
@@ -467,14 +485,14 @@ async function routeState(env, url) {
   const player = await getPlayer(env, wallet);
   if (!player) {
     out.player = {
-      wallet, ...progressFor(0), streak: 0, bestStreak: 0, multiplier: 1,
+      wallet, ...progressFor(0), total: 0, streak: 0, bestStreak: 0, multiplier: 1,
       tasksToday: [], tasksDone: 0, monks: 0, monkDevotion: [], xHandle: null, refBonus: 0,
     };
     return json(out);
   }
 
   const monks = await env.DB.prepare(
-    'SELECT token_id, bind_mark, accrued FROM monks WHERE wallet = ? ORDER BY token_id',
+    'SELECT token_id, bind_mark FROM monks WHERE wallet = ? ORDER BY token_id',
   ).bind(wallet).all();
 
   const mask = player.task_day === clock.day ? player.tasks_mask : 0;
@@ -482,14 +500,18 @@ async function routeState(env, url) {
 
   out.player = {
     wallet,
+    /* `devotion` and the level are your PRACTICE — the rate one monk earns,
+       and what the rank ladder is tuned against. `total` is what the abbey
+       owes you: that practice multiplied across every habit you hold. */
     ...progressFor(player.devotion),
+    total: totalDevotion(player),
     streak: player.streak,
     pendingStreak: streak,
     bestStreak: player.best_streak,
     multiplier: multiplierFor(streak) / 10000,
     tasksToday: Object.keys(TASKS).filter((t) => mask & TASKS[t]),
     tasksDone: Object.keys(TASKS).filter((t) => mask & TASKS[t]).length,
-    monks: monks.results.length,
+    monks: player.monk_count,
     monkDevotion: monks.results.map((m) => ({
       tokenId: m.token_id,
       devotion: monkDevotion(m, player.devotion),
@@ -542,8 +564,10 @@ async function routeTask(env, wallet, body) {
   if (!clock.started) return fail('the abbey has not opened', 403);
   if (clock.ended) return fail('the abbey is closed', 403);
 
-  const held = await countMonks(env, wallet);
-  if (held === 0) return fail('you must hold a monk to keep the offices', 403);
+  const held = await getPlayer(env, wallet);
+  if (!held || held.monk_count === 0) {
+    return fail('you must hold a monk to keep the offices', 403);
+  }
 
   const t = now();
   // One atomic statement does the day-rollover and the claim: the mask resets
@@ -582,12 +606,17 @@ async function routeTask(env, wallet, body) {
   return json({
     ok: true,
     task,
+    /* `gained` is per monk; `gainedTotal` is what it was actually worth,
+       across every habit in the wallet. */
     gained: result.amount,
+    gainedTotal: result.amount * player.monk_count,
+    monks: player.monk_count,
     multiplier: multBp / 10000,
     streak: player.streak,
     dayComplete: player.tasks_mask === ALL_TASKS,
     tasksToday: Object.keys(TASKS).filter((k) => player.tasks_mask & TASKS[k]),
     ...progressFor(player.devotion),
+    total: totalDevotion(player),
   });
 }
 
@@ -620,54 +649,53 @@ async function routeXLink(env, wallet, body) {
   });
 }
 
-/** GET /leaderboard?by=wallet|monk&limit=100 — cached at the edge for a minute. */
+/**
+ * GET /leaderboard?by=total|practice&limit=100 — cached at the edge a minute.
+ *
+ * `total` is the real standing: devotion multiplied across every habit held.
+ * `practice` ranks the per-monk rate alone, so a devout player with one monk
+ * can still be seen — the two boards answer different questions.
+ */
 async function routeLeaderboard(env, url) {
-  const by = url.searchParams.get('by') === 'monk' ? 'monk' : 'wallet';
+  const by = url.searchParams.get('by') === 'practice' ? 'practice' : 'total';
   const limit = Math.min(200, Math.max(1, parseInt(url.searchParams.get('limit') || '100', 10)));
 
-  if (by === 'wallet') {
-    const rows = await env.DB.prepare(
-      `SELECT p.wallet, p.devotion, p.streak, p.best_streak,
-              (SELECT COUNT(*) FROM monks m WHERE m.wallet = p.wallet) AS monks
-         FROM players p
-        WHERE p.devotion > 0
-        ORDER BY p.devotion DESC, p.wallet ASC
-        LIMIT ?`,
-    ).bind(limit).all();
-    return json({
-      by,
-      entries: rows.results.map((r, i) => ({
-        rank: i + 1, wallet: r.wallet, devotion: r.devotion,
-        streak: r.streak, bestStreak: r.best_streak, monks: r.monks,
-        ...progressFor(r.devotion),
-      })),
-    });
-  }
+  const order = by === 'practice'
+    ? 'p.devotion DESC, p.wallet ASC'
+    : 'total DESC, p.devotion DESC, p.wallet ASC';
 
-  // Per-monk: the watermark maths lives in SQL so we never load every token.
   const rows = await env.DB.prepare(
-    `SELECT m.token_id, m.wallet, (m.accrued + p.devotion - m.bind_mark) AS devotion
-       FROM monks m JOIN players p ON p.wallet = m.wallet
-      ORDER BY devotion DESC, m.token_id ASC
+    `SELECT p.wallet, p.devotion, p.streak, p.best_streak, p.monk_count,
+            (p.monk_count * p.devotion - p.bind_sum) AS total
+       FROM players p
+      WHERE p.devotion > 0
+      ORDER BY ${order}
       LIMIT ?`,
   ).bind(limit).all();
+
   return json({
     by,
     entries: rows.results.map((r, i) => ({
-      rank: i + 1, tokenId: r.token_id, wallet: r.wallet, devotion: r.devotion,
+      rank: i + 1, wallet: r.wallet,
+      devotion: r.devotion, total: r.total,
+      streak: r.streak, bestStreak: r.best_streak, monks: r.monk_count,
+      ...progressFor(r.devotion),
     })),
   });
 }
 
-/** GET /monk/:id — one monk's standing, for marketplace listings. */
+/** GET /monk/:id — one habit's standing. */
 async function routeMonk(env, tokenId) {
   const row = await env.DB.prepare(
-    `SELECT m.token_id, m.wallet, (m.accrued + p.devotion - m.bind_mark) AS devotion
+    `SELECT m.token_id, m.wallet, (p.devotion - m.bind_mark) AS devotion, m.minted_at
        FROM monks m JOIN players p ON p.wallet = m.wallet
       WHERE m.token_id = ?`,
   ).bind(tokenId).first();
   if (!row) return fail('unknown monk', 404);
-  return json({ tokenId: row.token_id, wallet: row.wallet, devotion: row.devotion });
+  return json({
+    tokenId: row.token_id, wallet: row.wallet,
+    devotion: row.devotion, mintedAt: row.minted_at,
+  });
 }
 
 /**
@@ -737,7 +765,11 @@ async function routeXVerify(env, body) {
 /** GET /admin/stats — is the abbey healthy? */
 async function routeStats(env) {
   const [players, monks, events, lastBlock, lastSync] = await Promise.all([
-    env.DB.prepare('SELECT COUNT(*) AS n, SUM(devotion) AS d FROM players').first(),
+    env.DB.prepare(
+      `SELECT COUNT(*) AS n, SUM(devotion) AS d,
+              SUM(monk_count * devotion - bind_sum) AS total
+         FROM players`,
+    ).first(),
     env.DB.prepare('SELECT COUNT(*) AS n FROM monks').first(),
     env.DB.prepare('SELECT COUNT(*) AS n FROM events').first(),
     getMeta(env, 'last_block'),
@@ -745,7 +777,7 @@ async function routeStats(env) {
   ]);
   return json({
     clock: dayState(env),
-    players: players.n, devotion: players.d || 0,
+    players: players.n, devotion: players.d || 0, total: players.total || 0,
     monks: monks.n, events: events.n,
     lastBlock: lastBlock ? parseInt(lastBlock, 10) : null,
     lastSync: lastSync ? parseInt(lastSync, 10) : null,
@@ -816,4 +848,7 @@ export default {
   },
 };
 
-export { levelFor, levelFloor, multiplierFor, streakForDay, progressFor, recoverSigner, rankFor };
+export {
+  levelFor, levelFloor, multiplierFor, streakForDay, progressFor,
+  recoverSigner, rankFor, totalDevotion, monkDevotion,
+};

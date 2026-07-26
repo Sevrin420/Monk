@@ -1060,15 +1060,23 @@ function drawHUD(g) {
 
   g.font = FONT; g.textBaseline = 'middle'; g.textAlign = 'left';
 
-  /* the flame sigil — devotion, in one mark */
+  /* The headline number is TOTAL devotion — your practice multiplied across
+     every habit you hold — because that is what the leaderboard ranks. The
+     "xN" after it is how many monks are doing the multiplying. */
   drawGlow(g, 9, by + 9, 9, 0.26);
   drawFlame(g, 9, by + 12, 3, 1.15);
   g.fillStyle = C.goldHi;
-  g.fillText(String(p.devotion), 16, by + 8);
+  g.fillText(String(p.total), 16, by + 8);
+  const totalW = g.measureText(String(p.total)).width;
+  if (p.monks > 0) {
+    g.font = '6px "Press Start 2P", monospace';
+    g.fillStyle = C.gold;
+    g.fillText(`x${p.monks}`, 19 + totalW, by + 9);
+  }
 
   /* the three offices, as lamps: lit when kept */
   const done = p.tasksToday;
-  let ox = 96;
+  let ox = 134;
   g.font = '6px "Press Start 2P", monospace';
   g.fillStyle = C.dim; g.textAlign = 'right';
   g.fillText('OFFICES', ox - 4, by + 8);
@@ -1118,7 +1126,7 @@ function drawHUD(g) {
    levels itself — the Worker is the only authority, so a tampered client
    can lie to its own screen and nowhere else. */
 const BLANK = {
-  devotion: 0, level: 1, rank: 'Postulant', intoLevel: 0, levelSpan: 30,
+  devotion: 0, total: 0, level: 1, rank: 'Postulant', intoLevel: 0, levelSpan: 30,
   toNextLevel: 30, streak: 0, multiplier: 1, tasksToday: [], monks: 0,
   monkDevotion: [], xHandle: null, refBonus: 0,
 };
@@ -1252,10 +1260,18 @@ async function mint(qty, referrer) {
 
 let ceremony = null;   // { task, t, phase }
 
+/**
+ * Distance from the player to each station's own rectangle, not to a fixed
+ * standing spot — the player can always walk right up against a station until
+ * collision stops them, and a point-to-point test then misses by however far
+ * that is. Point-to-rect is correct wherever they end up.
+ */
+const NEAR = 22;
 function nearStation() {
   for (const [id, s] of Object.entries(STATIONS)) {
-    const dx = player.x - s.stand.x, dy = player.y - s.stand.y;
-    if (Math.abs(dx) < 14 && Math.abs(dy) < 16) return id;
+    const dx = Math.max(s.c0 * TS - player.x, 0, player.x - (s.c1 + 1) * TS);
+    const dy = Math.max(s.r0 * TS - player.y, 0, player.y - (s.r1 + 1) * TS);
+    if (dx * dx + dy * dy < NEAR * NEAR) return id;
   }
   return null;
 }
@@ -1298,16 +1314,19 @@ async function keepOffice(id) {
     try {
       const out = await api.task(id);
       Object.assign(state.player, {
-        devotion: out.devotion, level: out.level, rank: out.rank,
+        devotion: out.devotion, total: out.total, level: out.level, rank: out.rank,
         intoLevel: out.intoLevel, levelSpan: out.levelSpan,
         toNextLevel: out.toNextLevel, streak: out.streak,
-        multiplier: out.multiplier, tasksToday: out.tasksToday,
+        multiplier: out.multiplier, tasksToday: out.tasksToday, monks: out.monks,
       });
       candlesLit = Math.min(12, out.tasksToday.length * 4);
       if (id === 'candles') sound.match();
       sound.reward();
-      popup(`+${out.gained}`, player.x, player.y - 30, C.goldHi);
-      if (out.multiplier > 1) popup(`x${out.multiplier} STREAK`, player.x, player.y - 40, C.flame2);
+      /* the popup shows what it was really worth — the per-monk gain times
+         every habit in the wallet */
+      popup(`+${out.gainedTotal}`, player.x, player.y - 30, C.goldHi);
+      if (out.monks > 1) popup(`${out.gained} x${out.monks} MONKS`, player.x, player.y - 40, C.gold);
+      if (out.multiplier > 1) popup(`x${out.multiplier} STREAK`, player.x, player.y - 50, C.flame2);
 
       if (out.dayComplete) {
         sound.bell();
@@ -1380,12 +1399,14 @@ function renderBook() {
                  <button id="act-signin" class="primary">TAKE YOUR VOWS</button>`;
       } else {
         html += `<div class="tasklist">
+          <div><span class="dim">TOTAL DEVOTION</span><span class="good">${p.total}</span></div>
+          <div><span class="dim">PER MONK</span><span>${p.devotion}</span></div>
           <div><span class="dim">RANK</span><span>L${p.level} ${esc(p.rank)}</span></div>
-          <div><span class="dim">DEVOTION</span><span>${p.devotion}</span></div>
           <div><span class="dim">STREAK</span><span>${p.streak}d · x${p.multiplier}</span></div>
           <div><span class="dim">MONKS HELD</span><span>${p.monks} / ${CFG.maxPerWallet}</span></div>
           <div><span class="dim">FROM REFERRALS</span><span>${p.refBonus}</span></div>
         </div>
+        <p class="dim">Your rank follows your practice — the devotion one monk earns. Your total is that practice across every habit you hold.</p>
         <p class="dim">Day ${Math.max(0, state.clock.day) + 1} of ${state.clock.totalDays}.</p>`;
       }
     }
@@ -1393,7 +1414,8 @@ function renderBook() {
 
   } else if (bookTab === 1) {    /* ── HABIT: mint ── */
     html += `<p class="lead">A Monk is ${CFG.mintPrice} ETH. Up to ${CFG.maxPerWallet} per wallet.</p>
-             <p class="dim">Every Monk in your wallet earns everything you earn — you do not play them separately. Buy one on a secondary market and it starts earning the moment it lands.</p>`;
+             <p class="dim">Every Monk in your wallet earns everything you earn — you do not play them separately. Take another and it picks up your streak at once, multiplying everything you earn from that moment.</p>
+             <p class="dim">Habits are given, not traded: a Monk cannot be sold or transferred. The only way to hold more is to take them from the abbey.</p>`;
     if (!state.wallet) {
       html += `<button id="act-connect" class="primary">CONNECT WALLET</button>`;
     } else {
@@ -1449,16 +1471,20 @@ function renderBook() {
     }
 
   } else {                       /* ── THE ROLL: leaderboards ── */
-    html += `<div class="row"><button id="board-wallet">BROTHERS</button><button id="board-monk">MONKS</button></div>`;
+    html += `<div class="row"><button id="board-total">THE ROLL</button><button id="board-practice">MOST DEVOUT</button></div>`;
     if (!boardCache) {
       html += `<p class="dim">Loading the roll…</p>`;
     } else if (!boardCache.entries.length) {
       html += `<p class="dim">No devotion recorded yet. Be the first.</p>`;
     } else {
+      const byTotal = boardCache.by === 'total';
+      html += `<p class="dim">${byTotal
+        ? 'Devotion across every habit held.'
+        : 'Devotion per monk — practice alone, however many you hold.'}</p>`;
       html += `<div class="board">` + boardCache.entries.map(e => {
         const mine = e.wallet && state.wallet && e.wallet.toLowerCase() === state.wallet;
-        const who = boardCache.by === 'monk' ? `#${e.tokenId}` : shortAddr(e.wallet);
-        return `<div class="board-row${mine ? ' me' : ''}"><b>${e.rank}</b><span>${esc(who)}</span><span>${e.devotion}</span></div>`;
+        const score = byTotal ? e.total : e.devotion;
+        return `<div class="board-row${mine ? ' me' : ''}"><b>${e.rank}</b><span>${esc(shortAddr(e.wallet))}</span><span>${score}${byTotal ? ` <span class="dim">x${e.monks}</span>` : ''}</span></div>`;
       }).join('') + `</div>`;
     }
   }
@@ -1518,9 +1544,9 @@ function wireBook() {
     try { boardCache = await api.board(by); } catch (e) { boardCache = { by, entries: [] }; }
     renderBook();
   };
-  on('board-wallet', () => loadBoard('wallet'));
-  on('board-monk',  () => loadBoard('monk'));
-  if (bookTab === 4 && !boardCache) loadBoard('wallet');
+  on('board-total',    () => loadBoard('total'));
+  on('board-practice', () => loadBoard('practice'));
+  if (bookTab === 4 && !boardCache) loadBoard('total');
 }
 
 /* the d-pad drives the book: left/right change tabs, B closes */
@@ -1620,6 +1646,7 @@ function abbotSpeaks() {
     return say('THE ABBOT', [
       'You cannot keep the hours without a habit.',
       `A Monk is ${CFG.mintPrice} ETH, and no man here holds more than ${CFG.maxPerWallet}.`,
+      'They are given by the abbey and never sold on. Take one in THE BOOK.',
     ]);
   }
   const left = 3 - p.tasksToday.length;

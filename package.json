@@ -5,6 +5,7 @@
   "description": "MONK — an abbey, 1200 AD. 56 days of offices, devotion and streaks.",
   "scripts": {
     "compile": "hardhat compile",
+    "test": "hardhat test",
     "test:worker": "npm --prefix worker test"
   },
   "devDependencies": {

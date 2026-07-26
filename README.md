@@ -15,12 +15,11 @@ each. Keep all three and the day counts toward a streak, and streaks multiply
 everything you earn afterwards. Engaging with the Monk X account pays too.
 Every Monk NFT in your wallet earns the full devotion that wallet earns, so
 holding twenty is twenty times the yield with no extra clicking. The game runs
-56 days and you can join at any point before it ends, by minting or by buying
-a Monk on a secondary market.
+56 days and you can join at any point before it ends.
 
 | | |
 |---|---|
-| Mint | 0.01 ETH, max 20 per wallet |
+| Mint | 0.01 ETH, max 20 per wallet — **from the abbey only** |
 | Offices | 3/day × 10 devotion |
 | Streaks | 7d ×1.5 · 14d ×2 · 21d ×2.5 · 28d ×3 |
 | X engagement | like 2 · comment 3 · repost 5 |
@@ -29,32 +28,49 @@ a Monk on a secondary market.
 
 ---
 
+## Monks are soulbound
+
+A habit is given, never sold on. Once minted, a Monk cannot be transferred,
+approved or burned.
+
+That is a game rule before it is a technical one. Devotion is earned by a
+**wallet**, and every Monk in it shares that wallet's streak — so if monks were
+tradeable, the dominant move would be to grind a 28-day streak with one monk
+and then buy up cheap habits from lapsed players, instantly applying a 3× multiplier
+to tokens that were earning nothing. Soulbinding closes that arbitrage
+completely, and it means the only way to hold more monks is to mint them.
+
+A monk minted mid-game **picks up your streak immediately** — it multiplies
+everything you earn from that moment — but collects nothing retroactively.
+
+---
+
 ## Why the backend is this small
 
 The whole backend is **one Cloudflare Worker, one D1 database and one cron
-trigger**. It is designed to hold a few thousand daily players inside the free
-tier, and two decisions are what make that possible.
+trigger**, sized to hold a few thousand daily players inside the free tier.
+Three decisions make that possible.
 
-**Devotion is an accumulator, not a per-monk ledger.** A monk earns whatever
-its holder earns while it sits in that wallet. Written literally, a wallet with
-twenty monks would cost twenty row-updates on every single task. Instead
-`players.devotion` is a monotonic cumulative counter and each monk stores a
-watermark into it:
+**There is no ownership to track.** Soulbinding means a token's owner is fixed
+at mint. No transfer settlement, no re-binding, no reconciliation pass — the
+Worker only ever needs to learn that a mint happened.
+
+**Total devotion is derived, not stored.** `players.devotion` is a monotonic
+cumulative counter of *base* devotion — the rate one monk earns. A monk minted
+when that counter stood at `B` has since earned `devotion − B`, so summing over
+a wallet's monks collapses to arithmetic:
 
 ```
-monk devotion = accrued + (holder.devotion − bind_mark)
+total = monk_count × devotion − bind_sum
 ```
 
-Earning is therefore **one UPDATE regardless of how many monks you hold**, and
-only a *transfer* ever touches the monks table — where it settles what the monk
-earned under the old holder and re-watermarks it against the new one. This is
-the staking-index trick, applied to devotion.
+Both components move **only at mint**, so earning is one `UPDATE` on one row
+whether the wallet holds one monk or twenty. The `monks` table is written once
+per token and never read by the scoring maths at all.
 
-**Ownership comes from logs, not from polling.** A cron pass every five minutes
-replays `Transfer` and `Referral` from the Monk contract with a single
-`eth_getLogs` per chunk against a free public RPC. Mints, transfers and
-secondary sales all arrive through that one path, so a monk bought on a
-marketplace starts earning within a tick without anyone reporting the sale.
+**Mints come from logs, not polling.** A cron pass every five minutes replays
+`Transfer` out of the zero address and `Referral` with a single `eth_getLogs`
+per chunk against a free public RPC.
 
 D1 rather than KV because the free KV tier allows only 1,000 writes/day — a
 thousand players doing three offices is already 6,000. D1 free allows 100,000
@@ -134,8 +150,8 @@ block it.
 | `POST /auth/verify` | — | signature → 7-day session token |
 | `POST /task` | session | keep an office |
 | `POST /x/link` | session | claim an X handle, get a verification code |
-| `GET /leaderboard?by=wallet\|monk` | — | top 100, cached 60s at the edge |
-| `GET /monk/:id` | — | one monk's standing, for marketplace listings |
+| `GET /leaderboard?by=total\|practice` | — | top 100, cached 60s at the edge |
+| `GET /monk/:id` | — | one habit's standing |
 | `POST /admin/x/ingest` | admin | batch X engagement |
 | `POST /admin/x/verify` | admin | confirm a handle link by hand |
 | `POST /admin/sync` | admin | force a chain sync |
@@ -159,10 +175,19 @@ that reply confirms the link.
 
 ---
 
-## Levels
+## Levels and the two scores
+
+The game keeps two numbers apart on purpose:
+
+- **Devotion (practice)** — what one monk earns. Drives your level and rank.
+- **Total** — that practice across every habit you hold. Drives the leaderboard.
 
 Devotion to reach level L is `15·L·(L−1)`. One full day of offices (30) is
 exactly level 2. Ranks run Postulant → Abbot, one per level, and the ladder is
 tuned against the clock: keeping all three offices every single day for 56 days
 lands on **exactly level 16**, so a perfect run — or a shorter one paid for
 with X engagement and referrals — dies an Abbot.
+
+Because rank follows practice rather than total, holding twenty monks multiplies
+your yield without buying you a rank. Taking more habits is a yield decision,
+not a status one.

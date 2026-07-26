@@ -6,7 +6,13 @@ const KEY = process.env.DEPLOYER_PRIVATE_KEY;
 module.exports = {
   solidity: {
     version: '0.8.26',
-    settings: { optimizer: { enabled: true, runs: 200 } },
+    settings: {
+      optimizer: { enabled: true, runs: 200 },
+      /* OpenZeppelin 5.x uses `mcopy`, which needs Cancun. Base has had it
+         since Ecotone, so this is the correct target — leaving it at the
+         default (paris) fails to compile. */
+      evmVersion: 'cancun',
+    },
   },
   networks: {
     base: {

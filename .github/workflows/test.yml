@@ -1,0 +1,64 @@
+# Everything runs here — the abbey's books are checked on every push.
+name: test
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+jobs:
+  contracts:
+    name: contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install
+      # Soulbinding is the anti-arbitrage mechanism; these tests are the
+      # proof that a Monk genuinely cannot move.
+      - run: npx hardhat test
+
+  worker:
+    name: worker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+        working-directory: worker
+      # Signature recovery and the devotion maths, including the derived
+      # total identity that every score in the game depends on.
+      - run: npm test
+        working-directory: worker
+
+  e2e:
+    name: worker end-to-end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+        working-directory: worker
+      - name: apply the schema to a local D1
+        run: npx wrangler d1 execute monk --local --file=./schema.sql
+        working-directory: worker
+      - name: start the worker
+        run: |
+          printf 'SESSION_SECRET=ci-secret\nADMIN_KEY=local-admin-key\n' > .dev.vars
+          npx wrangler dev --port 8787 --local \
+            --var GAME_START:$(( $(date +%s) - 259200 )) &
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null http://localhost:8787/state && exit 0
+            sleep 2
+          done
+          echo "worker never came up"; exit 1
+        working-directory: worker
+      - name: walk a wallet through the whole loop
+        run: node test/e2e.mjs
+        working-directory: worker

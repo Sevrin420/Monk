@@ -12,6 +12,7 @@ import { keccak_256 } from '@noble/hashes/sha3';
 
 import {
   levelFor, levelFloor, multiplierFor, streakForDay, progressFor, recoverSigner, rankFor,
+  totalDevotion, monkDevotion,
 } from '../monk-worker.js';
 
 const hex = (b) => '0x' + [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
@@ -96,6 +97,67 @@ test('today counts toward the run you are building', () => {
   assert.equal(streakForDay({ last_full_day: 8, streak: 20 }, 10), 1);
   // Never played.
   assert.equal(streakForDay({ last_full_day: null, streak: 0 }, 3), 1);
+});
+
+/* ── the derived-total identity ──
+   `total = monk_count*devotion - bind_sum` replaces summing over the monks
+   table. If it ever drifts from the literal sum, every score in the game is
+   wrong, so check it against the brute-force definition. */
+
+/** The literal thing the identity is standing in for. */
+function bruteForceTotal(devotion, marks) {
+  return marks.reduce((sum, m) => sum + (devotion - m), 0);
+}
+/** Mint `n` monks into a wallet whose counter currently reads `devotion`. */
+function mintInto(p, n, marks) {
+  for (let i = 0; i < n; i++) {
+    marks.push(p.devotion);
+    p.monk_count += 1;
+    p.bind_sum += p.devotion;
+  }
+}
+
+test('total devotion matches summing every monk by hand', () => {
+  const p = { devotion: 0, monk_count: 0, bind_sum: 0 };
+  const marks = [];
+
+  mintInto(p, 3, marks);                        // three monks on day one
+  assert.equal(totalDevotion(p), 0);
+
+  p.devotion += 30;                             // a full day of offices
+  assert.equal(totalDevotion(p), 90);           // 3 monks x 30
+  assert.equal(totalDevotion(p), bruteForceTotal(p.devotion, marks));
+
+  mintInto(p, 2, marks);                        // two more, mid-game
+  assert.equal(totalDevotion(p), 90);           // they collect nothing backwards
+  assert.equal(totalDevotion(p), bruteForceTotal(p.devotion, marks));
+
+  p.devotion += 45;                             // a 1.5x day
+  assert.equal(totalDevotion(p), 90 + 5 * 45);  // now all five earn
+  assert.equal(totalDevotion(p), bruteForceTotal(p.devotion, marks));
+});
+
+test('the identity holds across a long randomised run', () => {
+  let seed = 12345;
+  const rnd = (n) => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) % n);
+  const p = { devotion: 0, monk_count: 0, bind_sum: 0 };
+  const marks = [];
+
+  for (let day = 0; day < 56; day++) {
+    if (marks.length < 20 && rnd(4) === 0) mintInto(p, 1 + rnd(3), marks);
+    p.devotion += 30 * (1 + rnd(3));
+    assert.equal(totalDevotion(p), bruteForceTotal(p.devotion, marks), `day ${day}`);
+  }
+  assert.ok(p.monk_count <= 22);
+});
+
+test('a monk minted later earns only from its own mint onward', () => {
+  const early = { bind_mark: 0 }, late = { bind_mark: 500 };
+  assert.equal(monkDevotion(early, 800), 800);
+  assert.equal(monkDevotion(late, 800), 300);
+  // and the late one immediately earns at the wallet's rate, not a reduced one
+  assert.equal(monkDevotion(late, 900) - monkDevotion(late, 800), 100);
+  assert.equal(monkDevotion(early, 900) - monkDevotion(early, 800), 100);
 });
 
 test('a perfect 56 days lands where the curve intends', () => {
