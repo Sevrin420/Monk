@@ -15,7 +15,7 @@ database_id = "REPLACE_WITH_D1_DATABASE_ID"
 # local dev uses the miniflare sqlite file; the id only matters for --remote
 
 [vars]
-# Day 0 begins at this unix timestamp; the game runs 56 days from here.
+# Day 0 begins at this unix timestamp; the game runs 60 days from here.
 # 2026-08-01T00:00:00Z — set this before you open the doors.
 GAME_START       = "1785542400"
 CONTRACT_ADDRESS = "0x0000000000000000000000000000000000000000"

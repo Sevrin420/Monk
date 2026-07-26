@@ -159,8 +159,8 @@ check('streak advanced to 1', last.streak === 1, last.streak);
     ] },
   });
   check('a replayed X action pays nothing', r2.body.skipped === 1, r2.body);
-  // monks multiply engagement exactly as they multiply offices: (5 + 2) x 2
-  check('retweet + like pay (5 + 2) x two monks', r2.body.devotion === 14, r2.body);
+  // X does NOT scale with monks: a repost is one repost, so 5 + 2 flat
+  check('retweet + like pay 5 + 2 flat, not per monk', r2.body.devotion === 7, r2.body);
 }
 
 {
@@ -168,9 +168,10 @@ check('streak advanced to 1', last.streak === 1, last.streak);
   check('admin routes need the key', status === 401, status);
 }
 
-// (3 offices x 10 + comment 3 + retweet 5 + like 2) x 2 monks = 80
+// offices scale with monks, X does not:
+//   3 offices x 10 x 2 monks = 60, plus comment 3 + retweet 5 + like 2 = 10
 const { body: state } = await api(`/state?wallet=${alice.wallet}`);
-check('devotion is one number, totalling 80', state.player.devotion === 80, state.player.devotion);
+check('devotion is one number, totalling 70', state.player.devotion === 70, state.player.devotion);
 check('both monks are counted', state.player.monks === 2, state.player.monks);
 check('the token ids are listed', JSON.stringify(state.player.tokens) === '[1,2]', state.player.tokens);
 check('the next office is priced with monks included',
@@ -185,7 +186,7 @@ check('the next office is priced with monks included',
 
   const { body: s } = await api(`/state?wallet=${alice.wallet}`);
   check('the new monks are counted', s.player.monks === 4, s.player.monks);
-  check('minting adds nothing backwards', s.player.devotion === 80, s.player.devotion);
+  check('minting adds nothing backwards', s.player.devotion === 70, s.player.devotion);
   check('but the next office is now worth twice as much',
     s.player.perOffice === 40, s.player.perOffice);
 
@@ -208,7 +209,7 @@ check('the next office is priced with monks included',
   check('an office already paid today cannot be re-earned by clearing the mask',
     body.gained === 0 || status !== 200, { status, gained: body.gained });
   const { body: s } = await api(`/state?wallet=${alice.wallet}`);
-  check('  and devotion did not move', s.player.devotion === 80, s.player.devotion);
+  check('  and devotion did not move', s.player.devotion === 70, s.player.devotion);
 }
 
 // A monk cannot be moved — nothing in the API exposes a transfer, and the
@@ -226,7 +227,7 @@ check('the next office is priced with monks included',
   const { body } = await api('/leaderboard');
   check('leaderboard ranks alice first', body.entries[0].wallet === alice.wallet, body.entries[0]);
   check('leaderboard reports the one score and monks held',
-    body.entries[0].devotion === 80 && body.entries[0].monks === 4, body.entries[0]);
+    body.entries[0].devotion === 70 && body.entries[0].monks === 4, body.entries[0]);
   check('and carol is behind her on 40',
     body.entries[1] && body.entries[1].devotion === 40, body.entries[1]);
 }

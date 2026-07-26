@@ -1,7 +1,7 @@
 /**
  * The parts of the Worker worth pinning down: signature recovery (a bug here
  * lets anyone sign in as anyone) and the devotion maths (a bug here silently
- * mis-scores the whole 56 days).
+ * mis-scores the whole 60 days).
  *
  *   cd worker && npm test
  */
@@ -110,12 +110,18 @@ test('each monk adds a whole office to the payout', () => {
   assert.equal(payout(10, 10000, 20), 200);
 });
 
-test('streak and monks stack', () => {
+test('streak and monks stack on an office', () => {
   assert.equal(payout(10, 15000, 1), 15);      // 1.5x, one monk
   assert.equal(payout(10, 15000, 2), 30);      // 1.5x, two monks
   assert.equal(payout(10, 30000, 20), 600);    // 3x, a full house
-  // X engagement rides the same rule
-  assert.equal(payout(5, 20000, 3), 30);       // a repost at 2x with three monks
+});
+
+test('X engagement takes the streak but NOT the monk count', () => {
+  // A repost is one repost however many habits you keep — the ingest path
+  // always passes monks: 1, so a full wallet must not turn 5 into 100.
+  assert.equal(payout(5, 10000, 1), 5);
+  assert.equal(payout(5, 20000, 1), 10);       // 2x streak still applies
+  assert.notEqual(payout(5, 20000, 1), payout(5, 20000, 20));
 });
 
 test('a wallet holding nothing is never paid less than one monk', () => {
@@ -140,16 +146,31 @@ test('minting mid-game changes what comes next, never what came before', () => {
   assert.equal(devotion, 550);                 // the 500 is untouched
 });
 
-test('a perfect 56 days lands where the curve intends', () => {
-  // 6 days at 1x, then 7 each at 1.5x / 2x / 2.5x, then days 28-56 at 3x.
-  let devotion = 0;
-  for (let day = 0; day < 56; day++) {
-    const streak = day + 1;
-    devotion += Math.floor((30 * multiplierFor(streak)) / 10000);
+test('a perfect 60 days lands where the curve intends', () => {
+  // 6 days at 1x, then 7 each at 1.5x / 2x / 2.5x, then days 28-60 at 3x.
+  // One monk, so 30 base a day.
+  const run = (days) => {
+    let devotion = 0;
+    for (let day = 0; day < days; day++) {
+      devotion += Math.floor((30 * multiplierFor(day + 1)) / 10000);
+    }
+    return devotion;
+  };
+  assert.equal(run(60), 4410);
+  assert.equal(levelFor(4410), 17);
+
+  // Abbot is reached with time to spare rather than on the final bell.
+  let abbotDay = null;
+  for (let d = 1; d <= 60 && abbotDay === null; d++) {
+    if (rankFor(levelFor(run(d))) === 'Abbot') abbotDay = d;
   }
-  assert.equal(devotion, 4050);
-  // Offices alone carry a player to Abbot's doorstep; X and referrals are
-  // what push the last few levels.
-  assert.equal(levelFor(devotion), 16);
-  assert.equal(rankFor(levelFor(devotion)), 'Abbot');
+  assert.equal(abbotDay, 51);
+});
+
+test('holding monks fills the same bar faster', () => {
+  // Four monks reach in a day what one monk needs four days for.
+  const oneMonkDay = payout(10, 10000, 1) * 3;
+  const fourMonkDay = payout(10, 10000, 4) * 3;
+  assert.equal(fourMonkDay, oneMonkDay * 4);
+  assert.equal(levelFor(fourMonkDay), levelFor(oneMonkDay * 4));
 });

@@ -50,7 +50,7 @@ Project assets live in **`assets/monk/`**. Never guess another location.
 
 ## Project Overview
 
-**Monk** is a 56-day devotion game set in an abbey in 1200 AD. Players mint a
+**Monk** is a 60-day devotion game set in an abbey in 1200 AD. Players mint a
 Monk NFT (0.01 ETH, max 20 per wallet), keep three daily offices, build streaks
 for multipliers, and earn extra devotion from X engagement and referrals.
 
@@ -132,8 +132,10 @@ one row however many monks are held.
 is load-bearing — without it a re-scanned block range would inflate
 `monk_count`, and every future office would overpay forever.
 
-Monks multiply offices and X engagement. **Referrals stay flat** (20 per monk
-brought in, no streak, no monk multiplier) — recruiting is not practice.
+**Only offices multiply by monks.** X engagement takes the streak but passes
+`monks: 1` — a repost is one repost however many habits are held, and twenty
+monks must not turn a single like into forty devotion. Referrals are flat in
+both (20 per monk brought in, no streak either) — recruiting is not practice.
 
 ### Idempotency
 
@@ -174,12 +176,18 @@ returns. A tampered client can lie to its own screen and nowhere else.
 - `streakForDay()` counts **today** as part of the run being built, so the
   multiplier is fixed for the whole day rather than changing between the first
   and third office.
-- X: like 2, comment 3, repost 5 — multiplied by streak AND monks.
+- X: like 2, comment 3, repost 5 — multiplied by the streak **only**. Engagement
+  does NOT scale with monks: a repost is one repost however many habits are held.
+  Offices are the only thing holdings multiply.
 - Referrals: 20 per monk brought in, **flat** (no multiplier of any kind).
 - Levels: devotion to reach level L is `15·L·(L−1)`. Ranks are one per level,
-  Postulant → Abbot. A **one-monk** perfect 56-day run lands on exactly level
-  16, which is the baseline the curve is tuned against; holding more monks
-  reaches Abbot sooner and keeps levelling past 16 with the rank pinned there.
+  Postulant → Abbot (level 16). A **one-monk** perfect 60-day run banks 4,410:
+  Abbot on day 51, finishing at level 17. Holding more monks fills the bar
+  proportionally faster and reaches Abbot sooner, with the rank pinned there
+  while the level keeps counting for the leaderboard's sake.
+  The curve constant (15) is what makes one full solo day exactly level 2 —
+  changing it to land Abbot on day 60 would cost that day-one level-up, which
+  is the more valuable of the two properties.
 - A wallet must hold ≥1 monk to keep offices.
 - Monks are minted from the abbey only, max 20/wallet, and cannot be traded.
 

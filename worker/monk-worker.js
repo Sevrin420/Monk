@@ -47,7 +47,7 @@ import { keccak_256 } from '@noble/hashes/sha3';
 
 /* ────────────────────────────── game rules ────────────────────────────── */
 
-const GAME_DAYS = 56;
+const GAME_DAYS = 60;
 const DAY = 86400;
 
 /** The three daily offices. Bit positions matter — they are stored in
@@ -68,7 +68,11 @@ function multiplierFor(streak) {
   return 10000;
 }
 
-/** X engagement, credited from an ingest batch. */
+/**
+ * X engagement, credited from an ingest batch. Multiplied by the streak, but
+ * NOT by monks held — a repost is one repost however many habits you keep.
+ * Only the offices scale with the wallet's holdings.
+ */
 const X_DEVOTION = { like: 2, comment: 3, retweet: 5 };
 
 /** Paid to the referrer, per monk minted through their link. Flat — the
@@ -76,8 +80,8 @@ const X_DEVOTION = { like: 2, comment: 3, retweet: 5 };
 const REFERRAL_DEVOTION = 20;
 
 /** Levels: devotion to REACH level L is 15·L·(L-1). One full day of offices
- *  (30) is exactly level 2, which makes the first session feel like progress;
- *  a task-only player finishes the 56 days around level 17. */
+ *  with a single monk (30) is exactly level 2, so the very first session ends
+ *  in a level-up. Holding more monks fills the bar proportionally faster. */
 function levelFor(devotion) {
   return Math.floor((15 + Math.sqrt(225 + 60 * Math.max(0, devotion))) / 30);
 }
@@ -90,11 +94,14 @@ const RANKS = [
   'Cantor', 'Sacristan', 'Almoner', 'Cellarer', 'Infirmarian', 'Scribe',
   'Precentor', 'Sub-Prior', 'Prior', 'Abbot',
 ];
-/** One rank per level, topping out at Abbot. This is deliberately tuned
- *  against the 56-day clock: keeping all three offices every single day
- *  lands on exactly level 16, so a perfect run — and only a perfect run,
- *  or a shorter one paid for with X engagement and referrals — dies an
- *  Abbot. Levels keep climbing past 16 for the leaderboard's sake. */
+/** One rank per level, topping out at Abbot at level 16.
+ *
+ *  Against the 60-day clock, a ONE-MONK player keeping all three offices
+ *  every single day banks 4,410 devotion: they make Abbot on day 51 and
+ *  finish at level 17, so the ladder is a full journey but not a cliffhanger.
+ *  Anyone holding more monks climbs proportionally faster and sits at Abbot
+ *  for longer. Levels keep counting past 16 so the leaderboard can still
+ *  separate people once the rank is pinned. */
 function rankFor(level) {
   return RANKS[Math.min(RANKS.length - 1, Math.max(0, level - 1))];
 }
@@ -733,9 +740,10 @@ async function routeXIngest(env, body) {
     const res = await credit(env, {
       wallet: player.wallet, kind: 'x', detail: `${action} ${tweetId}`,
       base, multBp: multiplierFor(streakForDay(player, clock.day)),
-      /* monks multiply engagement the same way they multiply offices —
-         one rule, so there is nothing to explain twice */
-      monks: player.monk_count,
+      /* Flat in monks: engagement is one person doing one thing, so holding
+         twenty habits must not turn a single like into forty devotion.
+         Only the offices scale with holdings. */
+      monks: 1,
       uniq: `x:${tweetId}:${action}:${handle}`,
       day,
     });

@@ -17,7 +17,8 @@ Three offices a day — **Confess**, **Pray**, **Light Candles**. Each is worth
 10 devotion **per monk you hold**: light the candles with one monk for 10, with
 two for 20, with twenty for 200. Keep all three offices in a day and the day
 counts toward a streak, and streaks multiply everything on top. Engaging with
-the Monk X account pays the same way. The game runs 56 days and you can join at
+the Monk X account pays too, though engagement does NOT scale with monks — a
+repost is one repost. The game runs 60 days and you can join at
 any point before it ends.
 
 ```
@@ -30,9 +31,9 @@ an office = 10  ×  streak multiplier  ×  monks held
 | Mint | 0.01 ETH, max 20 per wallet — **from the abbey only** |
 | Offices | 3/day × 10 devotion **per monk** |
 | Streaks | 7d ×1.5 · 14d ×2 · 21d ×2.5 · 28d ×3 |
-| X engagement | like 2 · comment 3 · repost 5 — also × streak × monks |
+| X engagement | like 2 · comment 3 · repost 5 — × streak only, **not** × monks |
 | Referrals | 20 per Monk minted through your link — flat, no multipliers |
-| Length | 56 days |
+| Length | 60 days |
 
 ---
 
@@ -212,9 +213,11 @@ that reply confirms the link.
 Devotion to reach level L is `15·L·(L−1)`. One full day of offices with a single
 monk (30) is exactly level 2. Ranks run Postulant → Abbot, one per level.
 
-The ladder is tuned against the clock for a **one-monk** player: keeping all
-three offices every single day for 56 days lands on exactly level 16, so a
-perfect solo run dies an Abbot. Holding more monks fills the bar proportionally
-faster — that is the point of holding them — so a twenty-monk wallet reaches
-Abbot within the first fortnight and keeps levelling past 16 with the rank
-pinned at the top of the ladder.
+A **one-monk** player keeping all three offices every single day for 60 days
+banks 4,410 devotion: they make Abbot on day 51 and finish at level 17. So the
+ladder is a full journey for a solo player, with a few days at the top rather
+than a photo-finish on the final bell.
+
+Holding more monks fills the same bar proportionally faster — that is the point
+of holding them — so a twenty-monk wallet reaches Abbot early and keeps
+levelling past 16 with the rank pinned at the top.

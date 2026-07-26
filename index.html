@@ -5,7 +5,7 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; connect-src 'self' https://rpc.mainnet.chain.robinhood.com https://monk.severin20.workers.dev; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; frame-src 'none'; object-src 'none'; base-uri 'self';">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>MONK — the abbey, 1200 AD</title>
-<meta name="description" content="Keep the offices. Earn devotion. 56 days in an abbey, 1200 AD.">
+<meta name="description" content="Keep the offices. Earn devotion. 60 days in an abbey, 1200 AD.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/5.7.2/ethers.umd.min.js"></script>
@@ -1094,7 +1094,7 @@ function drawHUD(g) {
     g.fillText(`${p.streak}d x${p.multiplier}`, W - 4, by + 8);
   } else {
     g.fillStyle = C.dim;
-    g.fillText(state.clock.ended ? 'CLOSED' : `DAY ${Math.max(0, state.clock.day) + 1}/56`, W - 4, by + 8);
+    g.fillText(state.clock.ended ? 'CLOSED' : `DAY ${Math.max(0, state.clock.day) + 1}/${state.clock.totalDays}`, W - 4, by + 8);
   }
 
   /* ── the level bar ── */
@@ -1130,7 +1130,7 @@ const BLANK = {
   monks: 0, tokens: [], xHandle: null, refBonus: 0,
 };
 const state = {
-  clock: { day: 0, totalDays: 56, started: true, ended: false },
+  clock: { day: 0, totalDays: 60, started: true, ended: false },
   player: Object.assign({}, BLANK),
   wallet: null, token: null, signedIn: false,
   online: false, note: '',
@@ -1469,7 +1469,7 @@ function renderBook() {
         <div><span>COMMENT</span><span class="good">3</span></div>
         <div><span>REPOST</span><span class="good">5</span></div>
       </div>
-      <p class="dim">Your streak and your monks multiply these exactly as they multiply an office.</p>`;
+      <p class="dim">Your streak multiplies these. Your monks do not — a repost is a repost, however many habits you keep.</p>`;
     if (!state.signedIn) {
       html += `<p class="dim">Take your vows first, on the VOWS page.</p>`;
     } else if (p.xHandle) {
