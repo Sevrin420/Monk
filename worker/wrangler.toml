@@ -2,11 +2,9 @@ name = "monk"
 main = "monk-worker.js"
 compatibility_date = "2024-09-23"
 
-# One cron is the entire chain-watching apparatus. Every five minutes it
-# replays Transfer + Referral logs, so a monk bought on a secondary market
-# starts earning within a tick without anyone reporting the sale.
-[triggers]
-crons = ["*/5 * * * *"]
+# No cron. Monks are soulbound, so holdings only change when a wallet mints —
+# the Worker reads balanceOf/referredCount with eth_call at sign-in and after
+# a mint, which is both simpler and cheaper than polling the chain.
 
 [[d1_databases]]
 binding = "DB"
@@ -24,12 +22,6 @@ CONTRACT_ADDRESS = "0x0000000000000000000000000000000000000000"
 # five-minute tick, which is well inside its rate limit.
 READ_RPC         = "https://rpc.mainnet.chain.robinhood.com"
 CHAIN_ID         = "4663"
-# !! SET THIS BEFORE THE FIRST DEPLOY !!
-# The block the Monk contract was deployed in. Orbit blocks are ~250ms, so
-# leaving this at 0 means the first cron pass crawls millions of blocks and
-# takes days to reach the present. Run .github/workflows/preflight.yml to read
-# the current head.
-START_BLOCK      = "0"
 
 # Secrets — never commit these. Set them with:
 #   npx wrangler secret put SESSION_SECRET   # any long random string

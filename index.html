@@ -341,21 +341,7 @@ const FONT = '8px "Press Start 2P", monospace';
 /* deterministic 2D hash — the same one Club Nile dithers with */
 function h2(x, y) { return (((x * 73856093) ^ (y * 19349663)) >>> 0) % 97; }
 
-function hex2rgb(h) {
-  return [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)];
-}
-function mixc(a, b, t) {
-  const A = hex2rgb(a), B = hex2rgb(b);
-  return '#' + A.map((v,i) => Math.round(v + (B[i]-v)*t).toString(16).padStart(2,'0')).join('');
-}
-
-/* ============================ sprites ============================
-   The player is deliberately the simplest thing on screen: Club Nile's
-   blank head with eyes, and a white oval for a body. Everything that
-   makes a monk a monk — the hood, the cord, the tonsure — is one or two
-   half-pixel marks on top of those two shapes. */
-
-/** chunky pixel ellipse, half-pixel grid */
+/** chunky pixel ellipse on the half-pixel grid — flames, lamps, shadows */
 function ellipse(g, cx, cy, rx, ry, col) {
   g.fillStyle = col;
   for (let y = Math.floor((cy-ry)*2)/2; y <= cy+ry; y += 0.5) {
@@ -365,435 +351,100 @@ function ellipse(g, cx, cy, rx, ry, col) {
     }
   }
 }
-function blk(g, x, y, w, h, col) { if (!col) return; g.fillStyle = col; g.fillRect(x, y, w, h); }
 
-/* Selective outline, lifted from Club Nile: a darkened tint of whatever
-   fill it borders, which reads far richer than a flat black key line. */
-function outlineHD(c) {
-  const w = c.width, h = c.height, g = c.getContext('2d');
-  const src = g.getImageData(0, 0, w, h);
-  const out = g.createImageData(w, h);
-  const A = (x, y) => (x < 0 || y < 0 || x >= w || y >= h) ? 0 : src.data[(y*w+x)*4+3];
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-    const i = (y*w+x)*4;
-    if (src.data[i+3] > 0) {
-      out.data[i] = src.data[i]; out.data[i+1] = src.data[i+1];
-      out.data[i+2] = src.data[i+2]; out.data[i+3] = 255;
-    } else if (A(x-1,y) || A(x+1,y) || A(x,y-1) || A(x,y+1)) {
-      let nr = 0, ng = 0, nb = 0, nc = 0;
-      const add = (xx, yy) => {
-        if (xx < 0 || yy < 0 || xx >= w || yy >= h) return;
-        const j = (yy*w+xx)*4;
-        if (src.data[j+3] > 0) { nr += src.data[j]; ng += src.data[j+1]; nb += src.data[j+2]; nc++; }
-      };
-      add(x-1,y); add(x+1,y); add(x,y-1); add(x,y+1);
-      if (nc) { nr /= nc; ng /= nc; nb /= nc; }
-      out.data[i]   = Math.round(nr*0.28 + 26*0.72);
-      out.data[i+1] = Math.round(ng*0.28 + 22*0.72);
-      out.data[i+2] = Math.round(nb*0.28 + 18*0.72);
-      out.data[i+3] = 255;
-    }
-  }
-  g.putImageData(out, 0, 0);
-}
+/* ============================ sprites ============================
+   The player is a supplied 4-direction sheet (assets/monk/monk-sprites.png):
+   one 40x60 frame per facing, in the order down · up · left · right. The
+   frames are device-resolution, so at the canvas's 2x transform they draw at
+   20x30 logical and land exactly on the backing pixel grid.
 
-/**
- * One frame of a monk. Logical space is 20 wide x 28 tall; the canvas is
- * 2x that so half-pixel detail survives.
- *
- * dir  : 'down' | 'up' | 'left' | 'right'
- * step : 0 or 1 — the walk cycle is the robe hem swaying and the feet
- *        alternating, because a robe has no legs to animate.
- * pose : 'stand' | 'kneel'
- */
-function monkFrame(t, dir, step, pose) {
+   There is no walk cycle in the art, so walking bobs the sprite a single
+   logical pixel — enough to read as movement without inventing frames. */
+
+const FRAME_W = 40, FRAME_H = 60;          // device px in the sheet
+const SPR_W = FRAME_W / 2, SPR_H = FRAME_H / 2;   // logical size on screen
+const DIR_FRAME = { down: 0, up: 1, left: 2, right: 3 };
+
+const monkSheet = new Image();
+monkSheet.src = 'assets/monk/monk-sprites.png';
+
+/* The abbot wears the same habit as everyone else — it is a monastery — so he
+   is the same sheet, lightened and cooled a touch so the two read apart at a
+   glance without needing a second set of art. */
+let abbotSheet = null;
+monkSheet.addEventListener('load', () => {
   const c = document.createElement('canvas');
-  /* 30 logical rows rather than 28: the heads are big, and the extra
-     headroom keeps a hood or a tonsure from clipping the top edge. The
-     figure still stands on the same baseline — see drawEntity. */
-  c.width = 40; c.height = 60; c.lw = 20; c.lh = 30;
+  c.width = monkSheet.width; c.height = monkSheet.height;
   const g = c.getContext('2d');
-  g.setTransform(2, 0, 0, 2, 0, 0);
-  g.imageSmoothingEnabled = false;
-  g.translate(1, 3);
-
-  const kneel = pose === 'kneel';
-  const drop = kneel ? 3 : 0;                 // whole figure sinks when kneeling
-  const sway = step ? 0.5 : 0;                // hem sway on the walk cycle
-  const cx = 9;
-
-  /* ── the body: a white oval. Nothing more. ── */
-  const bodyTop = 11 + drop, bodyBot = kneel ? 25 : 25;
-  const byc = (bodyTop + bodyBot) / 2, byr = (bodyBot - bodyTop) / 2;
-  ellipse(g, cx, byc, kneel ? 6.5 : 5.5, byr, t.robe);
-  /* cool shadow down the right, warm light up the left — the whole
-     reason a flat oval reads as cloth */
-  ellipse(g, cx + 2.5, byc + 0.5, 3.2, byr - 0.5, t.robeSh);
-  ellipse(g, cx - 2, byc - 1, 2.4, byr - 2, t.robeHi);
-  /* hem: a straight cut across the bottom so it sits on the floor */
-  blk(g, cx - 5.5, bodyBot - 0.5, 11, 1, t.robeSh);
-
-  /* cord at the waist — the one piece of colour on a habit. The player has
-     none: they are a plain white oval, and every robe detail belongs to the
-     abbot so the two read apart at a glance. */
-  if (!kneel && t.cord) {
-    blk(g, cx - 4.5 + sway, 17, 9, 0.5, t.cord);
-    blk(g, cx + 2 + sway, 17.5, 0.5, 2.5, t.cord);
+  g.drawImage(monkSheet, 0, 0);
+  const img = g.getImageData(0, 0, c.width, c.height);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    if (!d[i + 3]) continue;
+    d[i]     = Math.min(255, d[i]     * 0.82 + 46);
+    d[i + 1] = Math.min(255, d[i + 1] * 0.86 + 50);
+    d[i + 2] = Math.min(255, d[i + 2] * 0.95 + 58);
   }
-
-  /* feet, alternating — just enough to sell walking under a robe */
-  if (!kneel) {
-    const l = step ? 0.5 : 0, r = step ? 0 : 0.5;
-    blk(g, cx - 3.5, 25 - l, 2.5, 1, t.sandal);
-    blk(g, cx + 1,   25 - r, 2.5, 1, t.sandal);
-  }
-
-  /* ── the head: Club Nile's blank head with eyes, at 1.3x ── */
-  const hy = 5.5 + drop;
-  ellipse(g, cx, hy, 6.5, 7.15, t.skin);
-  ellipse(g, cx - 2, hy - 2, 3.4, 3.4, mixc(t.skin, '#fff6e2', 0.35));
-  ellipse(g, cx + 3.9, hy + 2, 2.6, 3.9, t.skinSh);
-
-  /* the hood, thrown back on the shoulders or up over the head */
-  if (t.hooded) {
-    ellipse(g, cx, hy - 0.65, 7.8, 7.8, t.robe);
-    ellipse(g, cx + 4.5, hy + 0.65, 3.4, 5.2, t.robeSh);
-    /* the hood's mouth: a dark opening that the face sits inside */
-    const ho = dir === 'left' ? -1.3 : dir === 'right' ? 1.3 : 0;
-    if (dir !== 'up') ellipse(g, cx + ho, hy + 1.3, 4.4, 4.7, '#2c2419');
-    ellipse(g, cx + ho, hy + 1.8, 3.9, 3.9, t.skin);
-  } else if (t.tonsure) {
-    /* Tonsure: a ring of hair around a shaved crown. Clipped to the top of
-       the skull and cut with a second, smaller dome — a straight bar across
-       the head at this size just reads as a blindfold. */
-    g.save();
-    g.beginPath();
-    g.rect(cx - 8, hy - 8, 16, 5.8);
-    g.clip();
-    ellipse(g, cx, hy - 1, 6.5, 6.5, t.hair);
-    ellipse(g, cx, hy - 1, 4.6, 4.8, mixc(t.skin, '#fff6e2', 0.15));
-    g.restore();
-  }
-  /* otherwise: completely bald. Nothing on the head at all — the player is
-     a blank head and a white oval, and that is the whole character. */
-
-  /* eyes — two dots, and that is the entire face. Facing away, none. */
-  if (dir !== 'up') {
-    const ey = hy + 1.3;
-    if (dir === 'down') {
-      blk(g, cx - 3.25, ey, 2, 2, t.eye);
-      blk(g, cx + 1.25, ey, 2, 2, t.eye);
-      blk(g, cx - 3.25, ey, 0.5, 0.5, C.white);
-      blk(g, cx + 1.25, ey, 0.5, 0.5, C.white);
-    } else {
-      /* in profile only the near eye shows */
-      const ex = cx + (dir === 'left' ? -3.25 : 1.25);
-      blk(g, ex, ey, 2, 2, t.eye);
-      blk(g, ex, ey, 0.5, 0.5, C.white);
-    }
-  }
-
-  g.setTransform(1, 0, 0, 1, 0, 0);
-  outlineHD(c);
-  return c;
-}
-
-/** A monk is four directions x two steps, plus a kneeling frame. */
-function makeMonk(traits) {
-  /* Defaults ARE the player: a white oval, a bald blank head, no cord and no
-     hood. Everything monastic is opt-in, and only the abbot opts in. */
-  const t = Object.assign({
-    robe: C.cloth, robeSh: C.clothSh, robeHi: C.clothHi,
-    skin: C.skin, skinSh: C.skinSh,
-    hair: '#6a5844', cord: null, sandal: '#4a3826', eye: '#2a2420',
-    hooded: false, tonsure: false,
-  }, traits || {});
-  const out = { kneel: monkFrame(t, 'down', 0, 'kneel') };
-  for (const dir of ['down', 'up', 'left', 'right']) {
-    out[dir] = [monkFrame(t, dir, 0, 'stand'), monkFrame(t, dir, 1, 'stand')];
-  }
-  return out;
-}
-
-const SPRITES = {
-  player: makeMonk({}),
-  /* the abbot: same construction, darker habit, hood up */
-  abbot: makeMonk({
-    robe: '#4a4238', robeSh: '#332e27', robeHi: '#6b6153',
-    hooded: true, cord: '#c8a860', skin: '#dcb488', skinSh: '#b08a60',
-  }),
-};
+  g.putImageData(img, 0, 0);
+  abbotSheet = c;
+});
 
 /* ============================ the abbey ============================
-   One room, fifteen tiles square. Three stations, one for each office,
-   set far enough apart that keeping all three is a small walk. */
+   The room is a supplied plate (assets/monk/abbey.png, 480x416 device px =
+   240x208 logical). Everything below is measured off THAT image, not drawn —
+   so if the art changes, these numbers move with it.
 
-const WALL_H = 3 * TS;               // north wall: rows 0-2, the rose sits in it
+   The plate is cropped to a floor-tile seam so it scales to the room box with
+   no distortion, and the two figures that were painted into it (a monk and a
+   white-robed priest) were removed: characters are sprites, not scenery. */
+
+const abbeyPlate = new Image();
+abbeyPlate.src = 'assets/monk/abbey.png';
+
+const WALL_H = 57;                   // brick wall meets floor here
+const WALL_SIDE = 15;                // thickness of the left/right brick edge
 
 const STATIONS = {
   confess: {
     name: 'THE CONFESSIONAL', verb: 'CONFESS',
-    c0: 1, c1: 3, r0: 6, r1: 9,          // west wall
-    stand: { x: 4.5 * TS, y: 8 * TS },   // where the player is when facing it
+    x0: 17, y0: 92, x1: 65, y1: 160,     // the oak booth on the west wall
     face: 'left',
   },
   pray: {
     name: 'THE HIGH ALTAR', verb: 'PRAY',
-    c0: 6, c1: 8, r0: 3, r1: 3,          // on the dais, under the rose window
-    /* a row further back than the other two: kneeling any closer puts the
-       player's head over the altar cloth */
-    stand: { x: 7.5 * TS, y: 6 * TS },
+    x0: 94, y0: 34, x1: 145, y1: 70,     // altar, plinth and step, under the rose
     face: 'up',
   },
   candles: {
     name: 'THE CANDLE RACK', verb: 'LIGHT CANDLES',
-    c0: 11, c1: 13, r0: 6, r1: 9,        // east wall
-    stand: { x: 10.5 * TS, y: 8 * TS },
+    x0: 176, y0: 100, x1: 222, y1: 155,  // the iron-and-oak rack on the east wall
     face: 'right',
   },
 };
 
-/* Solid rectangles, in pixels. Collision is a box test against this list —
-   ten rectangles are faster to check than a tile lookup and far easier to
-   read than a map array. */
+/* Solid rectangles in logical pixels, measured off the plate. Collision is a
+   box test against this list — a dozen rectangles are quicker to check than a
+   tile lookup and far easier to reconcile against the art by eye. */
 const SOLIDS = [
-  [0, 0, W, WALL_H],                                     // north wall
-  [5.5 * TS, WALL_H, 4 * TS, 20],                        // altar + its dais
-  [0, 0, TS, ROOM_H], [W - TS, 0, TS, ROOM_H],           // side walls
-  [0, ROOM_H - TS, W, TS],                               // south wall
-  [TS, 6 * TS, 3 * TS, 4 * TS],                          // confessional
-  [11 * TS, 6 * TS, 3 * TS, 4 * TS],                     // candle rack
-  [3 * TS, 5 * TS, TS, TS], [11 * TS, 5 * TS, TS, TS],   // pillars
-  [3 * TS, 10 * TS, TS, TS], [11 * TS, 10 * TS, TS, TS],
+  [0, 0, W, WALL_H],                                   // north wall
+  [94, WALL_H, 51, 70 - WALL_H],                       // the altar step juts out
+  [0, 0, WALL_SIDE, ROOM_H],                           // west wall
+  [W - WALL_SIDE, 0, WALL_SIDE, ROOM_H],               // east wall
+  [0, ROOM_H - 4, W, 4],                               // the sill at the bottom
+  [17, 92, 48, 68],                                    // confessional
+  [176, 100, 46, 55],                                  // candle rack
+  [46, 61, 19, 19], [175, 61, 19, 19],                 // upper wall niches
+  [46, 172, 19, 21], [175, 172, 19, 21],               // lower wall niches
 ];
 
 function blocked(px, py) {
-  /* the player's feet, not their head — a 8x5 box at the base of the sprite */
-  const x0 = px - 4, x1 = px + 4, y0 = py - 2, y1 = py + 3;
+  /* the player's feet, not their head — a 9x5 box at the base of the sprite */
+  const x0 = px - 4.5, x1 = px + 4.5, y0 = py - 2, y1 = py + 3;
   for (const [sx, sy, sw, sh] of SOLIDS) {
     if (x1 > sx && x0 < sx + sw && y1 > sy && y0 < sy + sh) return true;
   }
   return false;
 }
-
-/* ── the room, painted once into an offscreen canvas ──
-   Nothing in the abbey moves except firelight, so the whole room is one
-   drawImage per frame and the flames are painted over it. */
-const bg = document.createElement('canvas');
-bg.width = W * 2; bg.height = ROOM_H * 2;
-(function paintAbbey() {
-  const g = bg.getContext('2d');
-  g.setTransform(2, 0, 0, 2, 0, 0);
-  g.imageSmoothingEnabled = false;
-
-  /* ── flagstone floor: irregular slabs, not a checkerboard ── */
-  g.fillStyle = C.stoneB; g.fillRect(0, 0, W, ROOM_H);
-  for (let r = 0; r < ROWS; r++) {
-    for (let c = 0; c < COLS; c++) {
-      const k = h2(c, r);
-      g.fillStyle = k % 5 === 0 ? C.stoneA : k % 7 === 0 ? C.stoneC : C.stoneB;
-      g.fillRect(c*TS, r*TS, TS, TS);
-      /* mortar joins, lit on top and shadowed at the base */
-      g.fillStyle = 'rgba(255,250,235,0.16)'; g.fillRect(c*TS, r*TS, TS, 0.5);
-      g.fillStyle = C.stoneLine; g.fillRect(c*TS, r*TS + TS - 0.5, TS, 0.5);
-      g.fillStyle = C.stoneLine; g.fillRect(c*TS + TS - 0.5, r*TS, 0.5, TS);
-      /* wear and grit */
-      for (let i = 0; i < 6; i++) {
-        const hx = h2(c*11 + i, r*7);
-        g.fillStyle = hx % 2 ? 'rgba(255,250,235,0.14)' : 'rgba(60,55,45,0.16)';
-        g.fillRect(c*TS + hx % TS, r*TS + h2(r*11 + i, c*7) % TS, 0.5, 0.5);
-      }
-    }
-  }
-
-  /* ── the red runner, door to altar ── */
-  const rx = 6*TS + 4, rw = 3*TS - 8, ry = 4*TS, rh = 8*TS;
-  for (let y = 0; y < rh; y++) {
-    g.fillStyle = y < 2 ? C.runnerLight : y > rh - 3 ? C.runnerDark : C.runner;
-    g.fillRect(rx, ry + y, rw, 1);
-  }
-  for (let y = 2; y < rh - 2; y += 2) for (let x = (y % 4) ? 2 : 4; x < rw - 2; x += 4) {
-    g.fillStyle = h2(x, y) % 2 ? C.runnerDark : C.runnerLight;
-    g.fillRect(rx + x, ry + y, 0.5, 1);
-  }
-  g.fillStyle = C.runnerGold;                                  // gold borders
-  g.fillRect(rx + 1, ry, 0.5, rh); g.fillRect(rx + rw - 1.5, ry, 0.5, rh);
-  for (let y = ry + 6; y < ry + rh; y += 12) {                  // lozenges
-    g.fillStyle = C.runnerGold;
-    g.fillRect(rx + rw/2 - 1, y, 2, 0.5); g.fillRect(rx + rw/2 - 1.5, y + 0.5, 3, 0.5);
-    g.fillRect(rx + rw/2 - 1, y + 1, 2, 0.5);
-  }
-
-  /* ── north wall: ashlar courses ── */
-  const wallH = WALL_H;
-  for (let y = 0; y < wallH; y += 6) {
-    for (let x = (y / 6) % 2 ? -8 : 0; x < W; x += 16) {
-      g.fillStyle = h2(x, y) % 4 === 0 ? C.wallLight : C.wall;
-      g.fillRect(x, y, 16, 6);
-      g.fillStyle = C.wallLine;
-      g.fillRect(x, y + 5.5, 16, 0.5); g.fillRect(x + 15.5, y, 0.5, 6);
-    }
-  }
-  g.fillStyle = C.wallDark; g.fillRect(0, wallH - 2, W, 2);      // base shadow
-  g.fillStyle = 'rgba(255,250,235,0.2)'; g.fillRect(0, 0, W, 1);
-
-  /* side walls */
-  for (const sx of [0, W - TS]) {
-    for (let y = 0; y < ROOM_H; y += 6) {
-      g.fillStyle = h2(sx, y) % 4 === 0 ? C.wallLight : C.wall;
-      g.fillRect(sx, y, TS, 6);
-      g.fillStyle = C.wallLine; g.fillRect(sx, y + 5.5, TS, 0.5);
-    }
-    g.fillStyle = 'rgba(20,16,10,0.30)';
-    g.fillRect(sx === 0 ? TS : W - TS - 3, 0, 3, ROOM_H);        // cast shadow
-  }
-
-  /* ── rose window over the altar: the room's one piece of colour ── */
-  (function rose() {
-    const cx = 7.5*TS, cy = 21, R = 14;
-    g.fillStyle = '#3a352d';
-    ellipse(g, cx, cy, R + 1.5, R + 1.5, '#3a352d');
-    ellipse(g, cx, cy, R, R, '#20304a');
-    const petals = [C.glass1, C.glass2, C.glass3, C.glass4];
-    for (let i = 0; i < 8; i++) {
-      const a = (i / 8) * Math.PI * 2;
-      ellipse(g, cx + Math.cos(a)*7.5, cy + Math.sin(a)*7.5, 4, 4, petals[i % 4]);
-    }
-    ellipse(g, cx, cy, 4, 4, C.goldHi);
-    /* leading */
-    g.fillStyle = '#2a2620';
-    for (let i = 0; i < 8; i++) {
-      const a = (i / 8) * Math.PI * 2;
-      for (let d = 4; d < R; d += 0.5) g.fillRect(cx + Math.cos(a)*d, cy + Math.sin(a)*d, 0.5, 0.5);
-    }
-    /* light thrown down onto the dais */
-    const lg = g.createLinearGradient(0, cy + R, 0, cy + R + 26);
-    lg.addColorStop(0, 'rgba(255,232,180,0.30)');
-    lg.addColorStop(1, 'rgba(255,232,180,0)');
-    g.fillStyle = lg; g.fillRect(cx - 14, cy + R, 28, 26);
-  })();
-
-  /* lancet windows either side of the rose */
-  for (const wx of [3.2*TS, 11.2*TS]) {
-    g.fillStyle = '#3a352d'; g.fillRect(wx - 1, 8, 10, 30);
-    g.fillStyle = '#20304a'; g.fillRect(wx, 9, 8, 28);
-    ellipse(g, wx + 4, 13, 4, 5, '#20304a');
-    g.fillStyle = C.glass1; g.fillRect(wx + 1, 14, 6, 10);
-    g.fillStyle = C.glass3; g.fillRect(wx + 1, 24, 6, 6);
-    g.fillStyle = C.glass4; g.fillRect(wx + 1, 30, 6, 6);
-    g.fillStyle = '#2a2620'; g.fillRect(wx + 3.5, 9, 1, 28);
-    const lg = g.createLinearGradient(0, 38, 0, 60);
-    lg.addColorStop(0, 'rgba(190,215,255,0.22)'); lg.addColorStop(1, 'rgba(190,215,255,0)');
-    g.fillStyle = lg; g.fillRect(wx - 3, 38, 14, 22);
-  }
-
-  /* ── the high altar, on its dais ── */
-  (function altar() {
-    const ax = 6*TS, ay = WALL_H - 4, aw = 3*TS, ah = 24;
-    g.fillStyle = C.stoneDark; g.fillRect(ax - 6, ay + ah - 6, aw + 12, 8);   // dais step
-    g.fillStyle = C.stoneLit;  g.fillRect(ax - 6, ay + ah - 6, aw + 12, 1.5);
-    g.fillStyle = C.stoneA;    g.fillRect(ax, ay, aw, ah - 4);                // mensa
-    g.fillStyle = C.stoneLit;  g.fillRect(ax, ay, aw, 2);
-    g.fillStyle = C.stoneC;    g.fillRect(ax, ay + ah - 6, aw, 2);
-    /* white altar cloth with a gold hem */
-    g.fillStyle = C.cloth;     g.fillRect(ax + 2, ay + 3, aw - 4, 9);
-    g.fillStyle = C.clothSh;   g.fillRect(ax + 2, ay + 11, aw - 4, 1);
-    g.fillStyle = C.goldDark;  g.fillRect(ax + 2, ay + 12, aw - 4, 1);
-    for (let x = ax + 5; x < ax + aw - 4; x += 6) {
-      g.fillStyle = C.gold; g.fillRect(x, ay + 5, 2, 2); g.fillRect(x + 0.5, ay + 4.5, 1, 3);
-    }
-    /* the cross */
-    const cxx = ax + aw/2;
-    g.fillStyle = C.goldDark; g.fillRect(cxx - 1, ay - 12, 2, 14);
-    g.fillRect(cxx - 4.5, ay - 8, 9, 2);
-    g.fillStyle = C.gold;     g.fillRect(cxx - 0.5, ay - 12, 1, 14);
-    g.fillRect(cxx - 4.5, ay - 8, 9, 1);
-    g.fillStyle = C.goldHi;   g.fillRect(cxx - 0.5, ay - 11.5, 1, 3);
-  })();
-
-  /* ── the confessional: an oak booth against the west wall ── */
-  (function confessional() {
-    const s = STATIONS.confess;
-    const x = s.c0*TS, y = s.r0*TS, w = (s.c1-s.c0+1)*TS, h = (s.r1-s.r0+1)*TS;
-    g.fillStyle = C.woodDark; g.fillRect(x, y, w, h);
-    g.fillStyle = C.wood;     g.fillRect(x + 1, y + 1, w - 2, h - 2);
-    for (let yy = y + 2; yy < y + h - 2; yy += 5) {                 // plank lines
-      g.fillStyle = C.woodDark; g.fillRect(x + 2, yy, w - 4, 0.5);
-    }
-    g.fillStyle = C.woodHi;   g.fillRect(x + 1, y + 1, w - 2, 1);   // top light
-    /* the opening, facing east into the room, with its lattice screen */
-    const ox = x + w - 5, oy = y + 8, oh = h - 18;
-    g.fillStyle = '#171310'; g.fillRect(ox, oy, 5, oh);
-    g.fillStyle = C.woodLight;
-    for (let yy = oy; yy < oy + oh; yy += 3) g.fillRect(ox, yy, 5, 0.5);
-    for (let xx = ox; xx < ox + 5; xx += 2) g.fillRect(xx, oy, 0.5, oh);
-    /* a small gable and a cross on top */
-    g.fillStyle = C.woodDark;
-    for (let i = 0; i < 6; i++) g.fillRect(x + i, y - i/2, w - i*2, 1);
-    g.fillStyle = C.goldDark;
-    g.fillRect(x + w/2 - 0.5, y - 7, 1, 6); g.fillRect(x + w/2 - 2.5, y - 5, 5, 1);
-    /* a curtain, half-drawn */
-    g.fillStyle = C.runnerDark; g.fillRect(x + 2, y + 6, 6, oh + 4);
-    g.fillStyle = C.runner;     g.fillRect(x + 2, y + 6, 4, oh + 4);
-  })();
-
-  /* ── the candle rack: iron tiers against the east wall ── */
-  (function rack() {
-    const s = STATIONS.candles;
-    const x = s.c0*TS, y = s.r0*TS + 4, w = (s.c1-s.c0+1)*TS, h = (s.r1-s.r0+1)*TS - 8;
-    g.fillStyle = '#2e2b26'; g.fillRect(x + 2, y + h - 3, w - 4, 3);     // foot
-    g.fillStyle = '#3d3934'; g.fillRect(x + 3, y, 2, h);                 // uprights
-    g.fillStyle = '#3d3934'; g.fillRect(x + w - 6, y, 2, h);
-    for (let i = 0; i < 3; i++) {                                        // tiers
-      const ty = y + 6 + i * 14;
-      g.fillStyle = '#4a453e'; g.fillRect(x + 2, ty, w - 4, 2);
-      g.fillStyle = '#5d574e'; g.fillRect(x + 2, ty, w - 4, 0.5);
-      for (let k = 0; k < 4; k++) {                                      // spikes
-        g.fillStyle = '#39352f'; g.fillRect(x + 5 + k*8, ty - 2, 1, 2);
-      }
-    }
-    /* a prayer bench in front */
-    g.fillStyle = C.woodDark; g.fillRect(x - 4, y + h - 8, 4, 8);
-  })();
-
-  /* ── pillars: four, marking the crossing ── */
-  for (const [pc, pr] of [[3,5],[11,5],[3,10],[11,10]]) {
-    const x = pc*TS, y = pr*TS;
-    g.fillStyle = C.stoneDark; g.fillRect(x, y, TS, TS);
-    g.fillStyle = C.stoneA;    g.fillRect(x + 1, y, TS - 3, TS);
-    g.fillStyle = C.stoneLit;  g.fillRect(x + 1, y, 3, TS);
-    g.fillStyle = C.stoneC;    g.fillRect(x + TS - 4, y, 2, TS);
-    g.fillStyle = C.stoneLit;  g.fillRect(x - 1, y - 3, TS + 2, 4);      // capital
-    g.fillStyle = C.stoneDark; g.fillRect(x - 1, y + 1, TS + 2, 1);
-    g.fillStyle = 'rgba(20,16,10,0.28)'; g.fillRect(x + 2, y + TS, TS, 4);
-  }
-
-  /* ── the south wall and its door: where a new brother walks in ── */
-  (function door() {
-    for (let y = ROOM_H - TS; y < ROOM_H; y += 6) {
-      for (let x = ((y / 6) | 0) % 2 ? -8 : 0; x < W; x += 16) {
-        g.fillStyle = h2(x, y) % 4 === 0 ? C.wallLight : C.wall;
-        g.fillRect(x, y, 16, 6);
-        g.fillStyle = C.wallLine;
-        g.fillRect(x, y + 5.5, 16, 0.5); g.fillRect(x + 15.5, y, 0.5, 6);
-      }
-    }
-    g.fillStyle = 'rgba(255,250,235,0.18)'; g.fillRect(0, ROOM_H - TS, W, 1);
-    const dx = 6*TS + 2, dw = 3*TS - 4, dy = ROOM_H - TS;
-    g.fillStyle = C.woodDark; g.fillRect(dx, dy, dw, TS);
-    g.fillStyle = C.wood;     g.fillRect(dx + 1, dy, dw - 2, TS);
-    for (let x = dx + 3; x < dx + dw - 2; x += 5) {
-      g.fillStyle = C.woodDark; g.fillRect(x, dy, 0.5, TS);
-    }
-    g.fillStyle = '#3d3934';
-    g.fillRect(dx + 1, dy + 3, dw - 2, 1.5); g.fillRect(dx + 1, dy + 9, dw - 2, 1.5);
-  })();
-
-  /* a worn shadow line where wall meets floor, all round */
-  const vg = g.createLinearGradient(0, wallH - 4, 0, wallH + 10);
-  vg.addColorStop(0, 'rgba(20,16,10,0.35)'); vg.addColorStop(1, 'rgba(20,16,10,0)');
-  g.fillStyle = vg; g.fillRect(0, wallH - 4, W, 14);
-})();
 
 /* ── firelight: the only thing that animates in the room ── */
 function drawFlame(g, x, y, seed, scale) {
@@ -816,47 +467,48 @@ function drawGlow(g, x, y, r, a) {
    matins with the new day, so the room visibly tracks the player's streak. */
 let candlesLit = 0;
 
-function drawAltarCandles(g) {
-  const ax = 6*TS, aw = 3*TS, ay = WALL_H - 4;
-  for (const cx of [ax + 6, ax + aw - 6]) {
-    g.fillStyle = C.gold;      g.fillRect(cx - 1, ay - 2, 2, 4);        // stick
-    g.fillStyle = C.cloth;     g.fillRect(cx - 1, ay - 8, 2, 6);        // candle
-    g.fillStyle = C.clothSh;   g.fillRect(cx + 0.5, ay - 8, 0.5, 6);
-    drawGlow(g, cx, ay - 10, 14, 0.16);
-    drawFlame(g, cx, ay - 9, cx, 1);
-  }
-}
+/**
+ * The rack in the plate is empty shelves. Lighting the candles fills it, four
+ * per office kept, so the room visibly warms as the day is completed and goes
+ * dark again at matins.
+ */
 function drawRackCandles(g) {
   const s = STATIONS.candles;
-  const x = s.c0*TS, y = s.r0*TS + 4;
   for (let i = 0; i < 12; i++) {
+    if (i >= candlesLit) continue;
     const tier = (i / 4) | 0, k = i % 4;
-    const cx = x + 5.5 + k*8, ty = y + 6 + tier*14;
-    if (i < candlesLit) {
-      g.fillStyle = C.cloth;   g.fillRect(cx - 1, ty - 7, 2, 5);
-      g.fillStyle = C.clothSh; g.fillRect(cx + 0.5, ty - 7, 0.5, 5);
-      drawGlow(g, cx, ty - 8, 11, 0.14);
-      drawFlame(g, cx, ty - 8, i * 7, 0.8);
-    } else {
-      g.fillStyle = C.stoneDark; g.fillRect(cx - 0.5, ty - 2, 1, 2);    // a stub
-    }
+    const cx = s.x0 + 7 + k * 10.5;
+    const ty = s.y0 + 16 + tier * 17;
+    g.fillStyle = C.cloth;   g.fillRect(cx - 1, ty - 6, 2, 5);
+    g.fillStyle = C.clothSh; g.fillRect(cx + 0.5, ty - 6, 0.5, 5);
+    drawGlow(g, cx, ty - 7, 11, 0.16);
+    drawFlame(g, cx, ty - 7, i * 7, 0.8);
   }
 }
 
 /* ============================ entities ============================ */
-const player = { x: 7.5*TS, y: 11*TS, dir: 'up', frame: 0, animT: 0, pose: 'stand' };
-const abbot  = { x: 5.2*TS, y: 5.4*TS, dir: 'right', frame: 0, animT: 0, bob: 0 };
-const ABBOT_Y = 5.4 * TS;
+/* Positions measured off the plate: the player enters at the foot of the
+   runner, the abbot stands where the painted-out monk used to. */
+const player = { x: 120, y: 190, dir: 'up', frame: 0, animT: 0, moving: false };
+const abbot  = { x: 84,  y: 82,  dir: 'right', frame: 0, animT: 0, bob: 0, moving: false };
+const ABBOT_Y = 82;
 
-function drawEntity(g, ent, sprite) {
-  const set = ent.pose === 'kneel' ? sprite.kneel : sprite[ent.dir][ent.frame | 0];
-  const lw = set.lw, lh = set.lh;
-  /* contact shadow, so nobody floats */
-  ellipse(g, ent.x, ent.y + 2, 6, 2.5, C.shadow);
-  /* `+ 4` puts the sprite's feet two pixels below the anchor, whatever the
-     frame's height — which is why the taller canvas did not move anyone. */
-  g.drawImage(set, 0, 0, set.width, set.height,
-              Math.round((ent.x - lw/2) * 2) / 2, Math.round((ent.y - lh + 4) * 2) / 2, lw, lh);
+/**
+ * Blit one frame from a sheet. `bob` lifts the sprite a single logical pixel
+ * on alternate steps — the supplied art has no walk cycle, and inventing one
+ * badly would look worse than a bob.
+ */
+function drawEntity(g, ent, sheet) {
+  if (!sheet) return;
+  const col = DIR_FRAME[ent.dir] ?? 0;
+  const bob = ent.moving && ent.frame ? 1 : 0;
+  ellipse(g, ent.x, ent.y + 1, 5.5, 2, C.shadow);
+  g.drawImage(
+    sheet, col * FRAME_W, 0, FRAME_W, FRAME_H,
+    Math.round((ent.x - SPR_W / 2) * 2) / 2,
+    Math.round((ent.y - SPR_H + 3 - bob) * 2) / 2,
+    SPR_W, SPR_H,
+  );
 }
 
 /* ============================ input ============================ */
@@ -1171,6 +823,7 @@ const api = {
   state(wallet) { return this.call(`/state${wallet ? `?wallet=${wallet}` : ''}`); },
   task(task)    { return this.call('/task', { method: 'POST', body: { task }, auth: true }); },
   linkX(handle) { return this.call('/x/link', { method: 'POST', body: { handle }, auth: true }); },
+  sync()        { return this.call('/sync', { method: 'POST', auth: true }); },
   board()       { return this.call('/leaderboard?limit=25'); },
 };
 
@@ -1283,8 +936,8 @@ let ceremony = null;   // { task, t, phase }
 const NEAR = 22;
 function nearStation() {
   for (const [id, s] of Object.entries(STATIONS)) {
-    const dx = Math.max(s.c0 * TS - player.x, 0, player.x - (s.c1 + 1) * TS);
-    const dy = Math.max(s.r0 * TS - player.y, 0, player.y - (s.r1 + 1) * TS);
+    const dx = Math.max(s.x0 - player.x, 0, player.x - s.x1);
+    const dy = Math.max(s.y0 - player.y, 0, player.y - s.y1);
     if (dx * dx + dy * dy < NEAR * NEAR) return id;
   }
   return null;
@@ -1319,7 +972,6 @@ async function keepOffice(id) {
 
   /* face the station and settle into the office */
   player.dir = s.face;
-  player.pose = id === 'candles' ? 'stand' : 'kneel';
   ceremony = { task: id, t: 0 };
   if (id === 'pray') sound.chant();
   if (id === 'confess') sound.bell();
@@ -1360,7 +1012,6 @@ async function keepOffice(id) {
       say(s.name, e.message || 'the ledger refused the entry');
     } finally {
       ceremony = null;
-      player.pose = 'stand';
     }
   });
 }
@@ -1540,8 +1191,12 @@ function wireBook() {
       const tx = await mint(qty, ref);
       status('mint-status', 'minting…', 'dim');
       await tx.wait();
-      status('mint-status', `minted ${qty}. the abbey sees new monks within five minutes.`, 'good');
-      setTimeout(refresh, 4000);
+      /* Tell the abbey to re-read the chain now rather than waiting for the
+         next sign-in — the new habits should count from the very next office. */
+      try { await api.sync(); } catch (e) { /* the next sign-in will catch it */ }
+      await refresh();
+      status('mint-status', `minted ${qty}. every office now pays ${state.player.perOffice}.`, 'good');
+      renderBook();
     } catch (e) {
       status('mint-status', e.reason || e.message || 'mint failed', 'bad');
     }
@@ -1625,6 +1280,7 @@ function update() {
   if (dx && dy) { dx *= 0.7071; dy *= 0.7071; }
 
   const moving = !!(dx || dy);
+  player.moving = moving;
   if (moving) {
     if (dy < 0 && !dx) player.dir = 'up';
     else if (dy > 0 && !dx) player.dir = 'down';
@@ -1685,15 +1341,16 @@ const RANK_NEXT = l => RANKS_LIST[Math.min(RANKS_LIST.length - 1, Math.max(0, l)
 
 function render() {
   ctx.fillStyle = '#0b0a08'; ctx.fillRect(0, 0, W, H);
-  ctx.drawImage(bg, 0, 0, bg.width, bg.height, 0, 0, W, ROOM_H);
+  if (abbeyPlate.complete && abbeyPlate.naturalWidth) {
+    ctx.drawImage(abbeyPlate, 0, 0, abbeyPlate.width, abbeyPlate.height, 0, 0, W, ROOM_H);
+  }
 
-  drawAltarCandles(ctx);
   drawRackCandles(ctx);
 
-  /* the abbot drifts a little, so the room is not dead */
+  /* the abbot sways a little, so the room is not dead */
   abbot.y = ABBOT_Y + Math.sin(abbot.bob) * 1.2;
   const order = [abbot, player].sort((a, b) => a.y - b.y);
-  for (const e of order) drawEntity(ctx, e, e === player ? SPRITES.player : SPRITES.abbot);
+  for (const e of order) drawEntity(ctx, e, e === player ? monkSheet : abbotSheet);
 
   /* a prompt over whichever station you are standing at */
   const near = !dlg.open && !ceremony && nearStation();

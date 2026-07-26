@@ -56,8 +56,8 @@ and cannot reach the devotion you have already banked.
 
 ## Why the backend is this small
 
-The whole backend is **one Cloudflare Worker, one D1 database and one cron
-trigger**, sized to hold a few thousand daily players inside the free tier.
+The whole backend is **one Cloudflare Worker and one D1 database** — no cron,
+no indexer — sized to hold a few thousand daily players inside the free tier.
 Three decisions make that possible.
 
 **There is no ownership to track.** Soulbinding means a token's owner is fixed
@@ -71,9 +71,11 @@ one monk or twenty — and it is forward-only for free, since a number already
 banked cannot be reached by raising a count. No watermarks, no settlement. The
 `monks` table is written once per token and the scoring maths never reads it.
 
-**Mints come from logs, not polling.** A cron pass every five minutes replays
-`Transfer` out of the zero address and `Referral` with a single `eth_getLogs`
-per chunk against a free public RPC.
+**The chain is read, not indexed.** Soulbinding means holdings only go up, and
+only when that wallet mints — so there is nothing historical to reconstruct.
+Two `eth_call`s (`balanceOf`, `referredCount`) at sign-in replace what would
+otherwise be a cron, a log scan, a block cursor and a `START_BLOCK`. It costs
+about one RPC call per player per week instead of 288 a day.
 
 D1 rather than KV because the free KV tier allows only 1,000 writes/day — a
 thousand players doing three offices is already 6,000. D1 free allows 100,000
@@ -90,12 +92,12 @@ double-tapped button and a re-ingested X batch all credit exactly once.
 ```
 index.html            the game — console shell, engine, abbey, HUD
 js/config.js          the only file to edit to point at live infrastructure
-assets/monk/          console frame art
-contracts/Monk.sol    ERC-721: 0.01 ETH, max 20/wallet, emits Referral
+assets/monk/          console frame, abbey plate, monk sprite sheet
+contracts/Monk.sol    soulbound ERC-721: 0.01 ETH, max 20/wallet, referredCount
 worker/
   monk-worker.js      the entire backend
   schema.sql          four tables
-  wrangler.toml       bindings, vars, the cron
+  wrangler.toml       bindings and vars
   test/rules.test.mjs signature recovery + the devotion maths
   test/e2e.mjs        full loop against a running `wrangler dev`
 ```
@@ -121,14 +123,12 @@ Two things about this chain shape the code:
   5.x compiles `mcopy`, which needs it. Nitro has supported Cancun opcodes
   since ArbOS 32, so this is fine on a recently launched Orbit chain — the
   preflight workflow probes for it rather than assuming.
-- **Blocks are ~250ms**, so `START_BLOCK` matters far more than on a 2s chain.
-  Set it to the contract's deploy block or the first cron pass will crawl from
-  genesis for days.
+- **Blocks are ~250ms.** This no longer affects the backend (there is no block
+  cursor to fall behind), but it is why the chain is read rather than scanned.
 
 **Before deploying, run `.github/workflows/preflight.yml`** from the Actions
-tab. It deploys nothing and needs no key; it confirms the chain id, measures
-the real block time against the sync budget, checks that `eth_getLogs` serves
-the 800-block range the Worker uses, and probes MCOPY.
+tab. It deploys nothing and needs no key; it confirms the chain id and probes
+MCOPY.
 
 ---
 
@@ -149,9 +149,8 @@ npx wrangler secret put ADMIN_KEY           # bearer token for /admin/*
 npx wrangler deploy
 ```
 
-Then set `GAME_START`, `CONTRACT_ADDRESS` and `START_BLOCK` in
-`wrangler.toml`. `START_BLOCK` should be the block the contract was deployed
-in — getting it right saves the first cron pass a very long crawl.
+Then set `GAME_START` and `CONTRACT_ADDRESS` in `wrangler.toml`. There is no
+`START_BLOCK` and no cron to configure — the Worker reads holdings per wallet.
 
 ### Tests
 
@@ -187,7 +186,8 @@ block it.
 | `GET /monk/:id` | — | one habit's standing |
 | `POST /admin/x/ingest` | admin | batch X engagement |
 | `POST /admin/x/verify` | admin | confirm a handle link by hand |
-| `POST /admin/sync` | admin | force a chain sync |
+| `POST /sync` | session | re-read holdings from the chain (after a mint) |
+| `POST /admin/sync` | admin | force a chain read for one wallet |
 | `GET /admin/stats` | admin | health |
 
 ### X engagement

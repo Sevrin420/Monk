@@ -38,8 +38,16 @@ contract Monk is ERC721, Ownable {
     bool public mintOpen = true;
     string private _base;
 
-    /// Minted through someone's referral link. The Worker credits `referrer`
-    /// 20 devotion per monk in `quantity`.
+    /**
+     * Monks brought in through this wallet's referral link, counted in MONKS
+     * rather than in mints. Stored rather than merely emitted so the Worker
+     * can read it with a plain `eth_call` — an event would force it to scan
+     * logs, which in turn would force it to track a block cursor and a start
+     * block. One mapping removes that entire apparatus.
+     */
+    mapping(address => uint256) public referredCount;
+
+    /// Kept for explorers and analytics; the game reads `referredCount`.
     event Referral(address indexed referrer, address indexed minter, uint256 quantity);
     event MintOpenSet(bool open);
     event MaxSupplySet(uint256 maxSupply);
@@ -80,7 +88,10 @@ contract Monk is ERC721, Ownable {
             _safeMint(msg.sender, id + i + 1); // token ids start at 1
         }
 
-        if (referrer != address(0)) emit Referral(referrer, msg.sender, quantity);
+        if (referrer != address(0)) {
+            referredCount[referrer] += quantity;
+            emit Referral(referrer, msg.sender, quantity);
+        }
     }
 
     // ─────────────────────────── soulbound ───────────────────────────

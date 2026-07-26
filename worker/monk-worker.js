@@ -1,8 +1,8 @@
 /**
  * MONK — the entire backend.
  *
- * One Cloudflare Worker, one D1 database, one cron trigger. No Durable
- * Objects, no queues, no indexer, no paid RPC. It is built to sit inside the
+ * One Cloudflare Worker and one D1 database. No cron, no Durable Objects, no
+ * queues, no indexer, no paid RPC. It is built to sit inside the
  * free tier at a few thousand daily players, and three design choices make
  * that true:
  *
@@ -25,10 +25,11 @@
  *
  *      Earning is one UPDATE on one row however many monks are held.
  *
- *   3. MINTS COME FROM LOGS, NOT FROM POLLING.
- *      A cron pass replays `Transfer` out of the zero address and `Referral`
- *      with a single `eth_getLogs` per chunk against a free public RPC. It is
- *      the only thing that watches the chain.
+ *   3. THE CHAIN IS READ, NOT INDEXED.
+ *      Soulbinding means holdings only ever go up, and only when that wallet
+ *      mints — so there is no history to reconstruct. Two `eth_call`s at
+ *      sign-in (balanceOf, referredCount) replace what used to be a cron, a
+ *      log scan, a block cursor and a START_BLOCK.
  *
  * Bindings (wrangler.toml):
  *   DB               D1 database
@@ -36,7 +37,6 @@
  *   GAME_START       unix seconds, day 0 begins here
  *   CONTRACT_ADDRESS Monk ERC-721
  *   READ_RPC         public JSON-RPC endpoint
- *   START_BLOCK      block the contract was deployed in
  * Secrets (wrangler secret put ...):
  *   SESSION_SECRET   HMAC key for sign-in nonces and session tokens
  *   ADMIN_KEY        bearer token for /admin/*
@@ -333,18 +333,29 @@ async function credit(env, { wallet, kind, detail, base, multBp, monks, uniq, da
 }
 
 
-/* ───────────────────────────── chain syncing ───────────────────────────── */
+/* ───────────────────────────── chain reading ─────────────────────────────
+ *
+ * There is no log scan, no block cursor and no START_BLOCK. Because monks are
+ * SOULBOUND, a wallet's holding only ever goes up and only when that wallet
+ * mints — so there is no history to reconstruct, just a current number to
+ * read. Two `eth_call`s answer everything the game needs:
+ *
+ *   balanceOf(wallet)      how many habits they hold  -> multiplies earnings
+ *   referredCount(wallet)  monks brought in via their link -> flat devotion
+ *
+ * This is both simpler and cheaper than the cron it replaces: a five-minute
+ * trigger costs ~288 RPC calls a day whether or not anyone plays, whereas
+ * this costs one call per sign-in and one after a mint.
+ */
 
-const TOPIC_TRANSFER = keccakHex('Transfer(address,address,uint256)');
-const TOPIC_REFERRAL = keccakHex('Referral(address,address,uint256)');
+const ZERO = '0x0000000000000000000000000000000000000000';
+const SEL_BALANCE_OF = keccakHex('balanceOf(address)').slice(0, 10);
+const SEL_REFERRED   = keccakHex('referredCount(address)').slice(0, 10);
+const SEL_TOKENS_OF  = keccakHex('tokensOfOwner(address)').slice(0, 10);
 
-/** Most public RPCs cap `eth_getLogs` at 1,000 blocks. Stay under it. */
-const LOG_CHUNK = 800;
-/** Chunks per cron pass. Robinhood Chain is an Orbit rollup with ~250ms
- *  blocks, so a five-minute tick only has to cover ~1,200 blocks — this is
- *  ~16x that, which is the margin a cold or long-stalled worker uses to
- *  catch back up. It is NOT enough to crawl from genesis: set START_BLOCK. */
-const MAX_CHUNKS = 25;
+/** Seconds a wallet must wait between chain reads — stops a tight client
+ *  loop from turning into an RPC bill. */
+const SYNC_COOLDOWN = 20;
 
 async function rpc(env, method, params) {
   const res = await fetch(env.READ_RPC, {
@@ -358,114 +369,86 @@ async function rpc(env, method, params) {
   return out.result;
 }
 
-function getMeta(env, k) {
-  return env.DB.prepare('SELECT v FROM meta WHERE k = ?').bind(k).first()
-    .then((r) => (r ? r.v : null));
+/** `selector(address)` against the Monk contract, raw hex back. */
+function callRaw(env, selector, wallet) {
+  const data = selector + wallet.replace(/^0x/, '').toLowerCase().padStart(64, '0');
+  return rpc(env, 'eth_call', [{ to: env.CONTRACT_ADDRESS, data }, 'latest']);
 }
-function setMeta(env, k, v) {
-  return env.DB.prepare(
-    'INSERT INTO meta (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v',
-  ).bind(k, String(v)).run();
+/** …decoded as a single number. */
+async function callUint(env, selector, wallet) {
+  const hexOut = await callRaw(env, selector, wallet);
+  if (!hexOut || hexOut === '0x') return 0;
+  return Number(BigInt(hexOut));
 }
 
-const addrFromTopic = (topic) => '0x' + topic.slice(-40);
-const ZERO = '0x0000000000000000000000000000000000000000';
+/** Decode a `uint256[]` return: head offset, then length, then the items. */
+function decodeUintArray(hexOut) {
+  const b = (hexOut || '').replace(/^0x/, '');
+  if (b.length < 128) return [];
+  const len = Number(BigInt('0x' + b.slice(64, 128)));
+  const out = [];
+  for (let i = 0; i < len; i++) {
+    const w = b.slice(128 + i * 64, 192 + i * 64);
+    if (w.length === 64) out.push(Number(BigInt('0x' + w)));
+  }
+  return out;
+}
 
 /**
- * Record a newly minted monk.
+ * Bring a wallet's holdings and referrals up to date from the chain.
  *
- * All this has to do is raise `monk_count`, because the count is applied at
- * the moment devotion is earned — so a monk minted on day 30 makes every
- * office from day 30 onward worth more, and grants nothing backwards. There
- * is no watermark to keep and nothing to settle.
- *
- * This is the only write to the monks table in the whole system. There is no
- * transfer path: the contract reverts on any move, so a token's owner is
- * fixed the moment it is minted.
- *
- * `INSERT ... DO NOTHING` keyed on the token id makes a re-scanned block
- * range harmless — without it a replay would inflate `monk_count`, and with
- * it every future office would pay too much.
+ * Referral devotion is credited as a DELTA against a high-water mark: the
+ * contract's count is authoritative, we credit whatever it has moved by, and
+ * the `uniq` key carries the new total so two concurrent syncs cannot both
+ * pay for the same monks.
  */
-async function recordMint(env, tokenId, owner) {
-  await ensurePlayer(env, owner);
+async function syncWallet(env, wallet, { force = false } = {}) {
+  if (!env.CONTRACT_ADDRESS || !env.READ_RPC) return { skipped: 'not configured' };
+  if (env.CONTRACT_ADDRESS === ZERO) return { skipped: 'no contract' };
 
-  const row = await env.DB.prepare(
-    `INSERT INTO monks (token_id, wallet, minted_at) VALUES (?, ?, ?)
-     ON CONFLICT(token_id) DO NOTHING
-     RETURNING token_id`,
-  ).bind(tokenId, owner, now()).first();
-  if (!row) return false;
+  await ensurePlayer(env, wallet);
+  const player = await getPlayer(env, wallet);
+  const t = now();
+  if (!force && player.synced_at && t - player.synced_at < SYNC_COOLDOWN) {
+    return { skipped: 'cooling down', monks: player.monk_count };
+  }
+
+  const [monks, referred, tokens] = await Promise.all([
+    callUint(env, SEL_BALANCE_OF, wallet),
+    callUint(env, SEL_REFERRED, wallet).catch(() => player.ref_credited),
+    /* Cosmetic only — the game lists the ids in THE BOOK. A failure here must
+       not stop the holdings themselves being recorded. */
+    callRaw(env, SEL_TOKENS_OF, wallet).then(decodeUintArray).catch(() => null),
+  ]);
 
   await env.DB.prepare(
-    'UPDATE players SET monk_count = monk_count + 1, updated_at = ? WHERE wallet = ?',
-  ).bind(now(), owner).run();
-  return true;
-}
+    'UPDATE players SET monk_count = ?, synced_at = ?, updated_at = ? WHERE wallet = ?',
+  ).bind(monks, t, t, wallet).run();
 
-/**
- * Replay mint + Referral logs from the last synced block. Both topics come
- * back in one `eth_getLogs` call, already ordered by block and log index, so
- * a mint and its referral in the same block apply in the order they happened
- * on chain.
- */
-async function syncChain(env) {
-  if (!env.CONTRACT_ADDRESS || !env.READ_RPC) return { skipped: 'not configured' };
-
-  const head = parseInt(await rpc(env, 'eth_blockNumber', []), 16);
-  const stored = await getMeta(env, 'last_block');
-  let from = stored ? parseInt(stored, 10) + 1 : parseInt(env.START_BLOCK || '0', 10);
-  if (from > head) return { head, scanned: 0, logs: 0 };
-
-  let logsSeen = 0, chunks = 0;
-  while (from <= head && chunks < MAX_CHUNKS) {
-    const to = Math.min(head, from + LOG_CHUNK - 1);
-    const logs = await rpc(env, 'eth_getLogs', [{
-      address: env.CONTRACT_ADDRESS,
-      fromBlock: '0x' + from.toString(16),
-      toBlock: '0x' + to.toString(16),
-      topics: [[TOPIC_TRANSFER, TOPIC_REFERRAL]],
-    }]);
-
-    for (const log of logs) {
-      if (log.topics[0] === TOPIC_TRANSFER) {
-        /* Monks are soulbound, so the only Transfer the contract can ever
-           emit is a mint out of the zero address. Anything else would mean
-           the deployed contract is not the one in this repo — ignore it
-           rather than corrupt the books. */
-        const from = norm(addrFromTopic(log.topics[1]));
-        const owner = norm(addrFromTopic(log.topics[2]));
-        const tokenId = parseInt(log.topics[3], 16);
-        if (from === ZERO && owner !== ZERO) await recordMint(env, tokenId, owner);
-      } else {
-        const referrer = norm(addrFromTopic(log.topics[1]));
-        const minter = norm(addrFromTopic(log.topics[2]));
-        const quantity = parseInt(log.data, 16) || 0;
-        if (referrer !== ZERO && quantity > 0) {
-          await ensurePlayer(env, referrer);
-          await credit(env, {
-            wallet: referrer,
-            kind: 'referral',
-            detail: `${quantity} via ${minter}`,
-            /* Flat: 20 per monk brought in, NOT multiplied by the referrer's
-               own streak or holdings. Recruiting is not practice. */
-            base: REFERRAL_DEVOTION * quantity,
-            multBp: 10000,
-            monks: 1,
-            uniq: `ref:${log.transactionHash}:${log.logIndex}`,
-            day: Math.max(0, gameDay(env)),
-          });
-        }
-      }
-      logsSeen++;
-    }
-
-    await setMeta(env, 'last_block', to);
-    from = to + 1;
-    chunks++;
+  if (tokens && tokens.length) {
+    /* Soulbound, so a token can only ever be inserted once and never move. */
+    const stmt = env.DB.prepare(
+      'INSERT INTO monks (token_id, wallet, minted_at) VALUES (?, ?, ?) ON CONFLICT(token_id) DO NOTHING',
+    );
+    await env.DB.batch(tokens.map((id) => stmt.bind(id, wallet, t)));
   }
-  await setMeta(env, 'last_sync', now());
-  return { head, syncedTo: from - 1, logs: logsSeen, caughtUp: from > head };
+
+  let credited = 0;
+  const delta = referred - player.ref_credited;
+  if (delta > 0) {
+    const res = await credit(env, {
+      wallet, kind: 'referral', detail: `${delta} monk(s) referred`,
+      base: REFERRAL_DEVOTION * delta, multBp: 10000, monks: 1,
+      uniq: `ref:${wallet}:${referred}`,
+      day: Math.max(0, gameDay(env)),
+    });
+    if (res.credited) {
+      credited = res.amount;
+      await env.DB.prepare('UPDATE players SET ref_credited = ? WHERE wallet = ?')
+        .bind(referred, wallet).run();
+    }
+  }
+  return { monks, referred, credited };
 }
 
 /* ──────────────────────────────── routes ──────────────────────────────── */
@@ -558,6 +541,9 @@ async function routeVerify(env, body) {
   if (signer !== wallet) return fail('signature does not match wallet', 401);
 
   await ensurePlayer(env, wallet);
+  /* Read holdings on the way in, so the first office of the session is
+     already priced correctly. A dead RPC must not block sign-in. */
+  try { await syncWallet(env, wallet, { force: true }); } catch (e) { /* play on */ }
   return json({ token: await issueSession(env, wallet), wallet });
 }
 
@@ -574,7 +560,13 @@ async function routeTask(env, wallet, body) {
   if (!clock.started) return fail('the abbey has not opened', 403);
   if (clock.ended) return fail('the abbey is closed', 403);
 
-  const held = await getPlayer(env, wallet);
+  let held = await getPlayer(env, wallet);
+  if (!held || held.monk_count === 0) {
+    /* They may have minted seconds ago and never synced. Ask the chain before
+       turning them away — this is the one path where being wrong is costly. */
+    try { await syncWallet(env, wallet, { force: true }); } catch (e) { /* fall through */ }
+    held = await getPlayer(env, wallet);
+  }
   if (!held || held.monk_count === 0) {
     return fail('you must hold a monk to keep the offices', 403);
   }
@@ -765,21 +757,17 @@ async function routeXVerify(env, body) {
 
 /** GET /admin/stats — is the abbey healthy? */
 async function routeStats(env) {
-  const [players, monks, events, lastBlock, lastSync] = await Promise.all([
+  const [players, monks, events] = await Promise.all([
     env.DB.prepare(
       'SELECT COUNT(*) AS n, SUM(devotion) AS d, SUM(monk_count) AS held FROM players',
     ).first(),
     env.DB.prepare('SELECT COUNT(*) AS n FROM monks').first(),
     env.DB.prepare('SELECT COUNT(*) AS n FROM events').first(),
-    getMeta(env, 'last_block'),
-    getMeta(env, 'last_sync'),
   ]);
   return json({
     clock: dayState(env),
     players: players.n, devotion: players.d || 0, held: players.held || 0,
     monks: monks.n, events: events.n,
-    lastBlock: lastBlock ? parseInt(lastBlock, 10) : null,
-    lastSync: lastSync ? parseInt(lastSync, 10) : null,
   });
 }
 
@@ -823,7 +811,10 @@ export default {
         if (!isAdmin(env, request)) return fail('unauthorized', 401);
         if (path === '/admin/x/ingest') return routeXIngest(env, body);
         if (path === '/admin/x/verify') return routeXVerify(env, body);
-        if (path === '/admin/sync') return json(await syncChain(env));
+        if (path === '/admin/sync') {
+          if (!isAddress(body.wallet)) return fail('admin sync needs a wallet');
+          return json(await syncWallet(env, norm(body.wallet), { force: true }));
+        }
         if (path === '/admin/stats') return routeStats(env);
         return fail('not found', 404);
       }
@@ -833,17 +824,16 @@ export default {
       if (!wallet) return fail('sign in first', 401);
       if (path === '/task' && request.method === 'POST') return routeTask(env, wallet, body);
       if (path === '/x/link' && request.method === 'POST') return routeXLink(env, wallet, body);
+      if (path === '/sync' && request.method === 'POST') {
+        /* Called after a mint confirms. Rate-limited inside syncWallet. */
+        return json(await syncWallet(env, wallet));
+      }
       if (path === '/me') return routeState(env, new URL(`${url.origin}/state?wallet=${wallet}`));
 
       return fail('not found', 404);
     } catch (err) {
       return fail(`abbey error: ${err.message}`, 500);
     }
-  },
-
-  /** Cron: the only thing that watches the chain. */
-  async scheduled(event, env, ctx) {
-    ctx.waitUntil(syncChain(env).catch((e) => console.error('sync failed', e.message)));
   },
 };
 

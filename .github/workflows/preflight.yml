@@ -2,8 +2,8 @@
 #
 # Answers the questions the code depends on and that cannot be confirmed from
 # a dev sandbox: is the chain id what we think, does the public RPC serve
-# eth_getLogs over the 800-block range the Worker uses, how fast are blocks,
-# and does the chain support the Cancun opcodes OpenZeppelin 5.x compiles to.
+# eth_call (the backend's only chain operation), and does the chain support the
+# Cancun opcodes OpenZeppelin 5.x compiles to.
 #
 # Run it from the Actions tab. It deploys NOTHING and needs no key.
 name: preflight
@@ -59,32 +59,22 @@ jobs:
                           : bad(`chain id is ${id}, expected ${EXPECTED}`);
           try { console.log(`     client: ${await rpc('web3_clientVersion')}`); } catch {}
 
-          // ── block time: matters because START_BLOCK and the cron budget
-          //    are sized against it ──
+          // ── the two calls the Worker actually makes ──
+          // There is no log scan any more, so nothing here depends on block
+          // time or on getLogs range limits. Just prove eth_call works.
           const head = Number(await rpc('eth_blockNumber'));
-          console.log(`     head block: ${head}`);
-          const [a, b] = await Promise.all([
-            rpc('eth_getBlockByNumber', ['0x' + (head - 1000).toString(16), false]),
-            rpc('eth_getBlockByNumber', ['0x' + head.toString(16), false]),
-          ]);
-          const secsPerBlock = (Number(b.timestamp) - Number(a.timestamp)) / 1000;
-          console.log(`     ~${secsPerBlock.toFixed(3)}s per block`);
-          const perTick = Math.ceil(300 / secsPerBlock);
-          console.log(`     ~${perTick} blocks per 5-minute cron tick`);
-          perTick < 800 * 25
-            ? ok(`the sync budget (20,000 blocks/tick) covers it`)
-            : bad(`the sync CANNOT keep up — raise MAX_CHUNKS in monk-worker.js`);
-
-          // ── eth_getLogs over the exact range the Worker uses ──
+          console.log(`     head block: ${head}  (note this for reference only —`
+            + ' the backend has no START_BLOCK)');
           try {
-            const logs = await rpc('eth_getLogs', [{
-              fromBlock: '0x' + (head - 800).toString(16),
-              toBlock: '0x' + head.toString(16),
-              topics: [['0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef']],
-            }]);
-            ok(`eth_getLogs serves an 800-block range (${logs.length} logs)`);
+            // balanceOf(address) on the zero address: must return a clean word
+            const sel = '0x70a08231';
+            const out = await rpc('eth_call', [{
+              to: '0x0000000000000000000000000000000000000000',
+              data: sel + '0'.repeat(64),
+            }, 'latest']);
+            ok(`eth_call is served (returned ${out === '0x' ? 'empty' : out.length - 2} hex chars)`);
           } catch (e) {
-            bad(`eth_getLogs over 800 blocks failed: ${e.message} — lower LOG_CHUNK`);
+            bad(`eth_call failed: ${e.message} — the backend cannot read holdings`);
           }
 
           // ── Cancun opcodes: OpenZeppelin 5.x compiles `mcopy`, so a chain
@@ -110,5 +100,5 @@ jobs:
       - name: what to do next
         if: success()
         run: |
-          echo "Set START_BLOCK in worker/wrangler.toml to the contract's"
-          echo "deploy block before the first cron pass runs."
+          echo "Set GAME_START and CONTRACT_ADDRESS in worker/wrangler.toml."
+          echo "There is no START_BLOCK and no cron to configure."

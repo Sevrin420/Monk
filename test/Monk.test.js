@@ -105,6 +105,27 @@ describe('Monk', function () {
       expect(await monk.balanceOf(bob.address)).to.equal(1);
     });
 
+    it('counts referred MONKS, not referrals, so the Worker can read it', async function () {
+      // This mapping is what lets the backend drop its log scan entirely:
+      // one eth_call replaces a cron, a cursor and a START_BLOCK.
+      await monk.connect(alice).mint(1, { value: PRICE });
+      expect(await monk.referredCount(alice.address)).to.equal(0);
+
+      await monk.connect(bob).mintWithReferrer(3, alice.address, { value: PRICE * 3n });
+      expect(await monk.referredCount(alice.address)).to.equal(3);
+
+      const [, , , dave] = await ethers.getSigners();
+      await monk.connect(dave).mintWithReferrer(2, alice.address, { value: PRICE * 2n });
+      expect(await monk.referredCount(alice.address)).to.equal(5);
+    });
+
+    it('does not count a dropped referral', async function () {
+      // referrer holds nothing, so the referral is ignored — and must not
+      // leave a number behind for the Worker to pay out on.
+      await monk.connect(bob).mintWithReferrer(2, alice.address, { value: PRICE * 2n });
+      expect(await monk.referredCount(alice.address)).to.equal(0);
+    });
+
     it('refuses self-referral, but still mints', async function () {
       await monk.connect(alice).mint(1, { value: PRICE });
       await expect(monk.connect(alice).mintWithReferrer(1, alice.address, { value: PRICE }))

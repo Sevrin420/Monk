@@ -79,14 +79,10 @@ Two consequences that bite if forgotten:
   Nitro has supported Cancun opcodes since ArbOS 32, so this is fine on any
   recently launched Orbit chain — but it is the first thing to check if a
   deploy reverts on a call rather than failing to send.
-- **Blocks are fast** (Orbit defaults to ~250ms), so `START_BLOCK` matters far
-  more than on a 2s chain. Set it to the contract's deploy block or the first
-  cron pass will crawl from genesis for days. Run
-  `.github/workflows/preflight.yml` to read the current head before deploying.
-
-The public RPC is free but rate limited. The Worker uses roughly 3 requests per
-five-minute tick (~900/day), which is nowhere near any published limit — but it
-is the design's single external dependency.
+- **The public RPC is free but rate limited.** The Worker only touches it at
+  sign-in and after a mint (~1–2 calls per player per week), so it is nowhere
+  near any published limit — but it is the design's single external dependency.
+  Run `.github/workflows/preflight.yml` before deploying.
 
 ---
 
@@ -128,9 +124,9 @@ minting speeds up everything afterwards and cannot reach devotion already
 banked. There is no watermark, no settlement, and earning stays one UPDATE on
 one row however many monks are held.
 
-`recordMint()` is the only writer of `monks`, and its `ON CONFLICT DO NOTHING`
-is load-bearing — without it a re-scanned block range would inflate
-`monk_count`, and every future office would overpay forever.
+`monk_count` is set from `balanceOf` rather than accumulated, so it cannot
+drift — but it must never be *decremented* by hand either: soulbinding is what
+guarantees the chain's number only rises.
 
 **Only offices multiply by monks.** X engagement takes the streak but passes
 `monks: 1` — a repost is one repost however many habits are held, and twenty
@@ -145,22 +141,34 @@ Every credit goes through `credit()` with a `uniq` key:
 |---|---|
 | task | `task:{wallet}:{day}:{office}` |
 | X | `x:{tweetId}:{action}:{handle}` |
-| referral | `ref:{txHash}:{logIndex}` |
+| referral | `ref:{wallet}:{referredCount}` |
 
 The INSERT either takes or is ignored, and only a fresh insert moves the
 counter. Replayed chain logs, double-tapped buttons and re-ingested X batches
 are all safe. **Any new devotion source needs a `uniq` key of its own.**
 
-### Chain sync
+### Chain reading — there is NO log scan
 
-`scheduled()` → `syncChain()` runs every 5 minutes. One `eth_getLogs` per
-800-block chunk pulls `Transfer` and `Referral` together (both topics in one
-`topics[0]` array), ordered by block and log index. Only mints (`from == 0x0`)
-are acted on; any other `Transfer` means the deployed contract is not the one
-in this repo, and is ignored rather than trusted. The cursor lives in
-`meta.last_block`.
+Soulbinding means a wallet's holdings only ever go up, and only when that
+wallet mints, so there is no history to reconstruct. `syncWallet()` makes two
+`eth_call`s and that is the entire chain interface:
 
-There is no indexer and no paid RPC, on purpose.
+| call | used for |
+|---|---|
+| `balanceOf(wallet)` | `monk_count` — multiplies every payout |
+| `referredCount(wallet)` | flat referral devotion, credited as a delta |
+
+It runs at sign-in, on `POST /sync` (which the client calls after a mint
+confirms), and from `/task` when a player's count is 0 — that last one is the
+safety net that stops someone who just minted from being locked out.
+
+Referrals are credited against the `ref_credited` high-water mark, with the
+new total in the `uniq` key so two concurrent syncs cannot both pay.
+
+**There is no cron and no `START_BLOCK`.** Do not reintroduce them: a
+five-minute trigger costs ~288 RPC calls/day whether or not anyone plays,
+while this costs one call per sign-in. `referredCount` is a stored mapping
+rather than only an event precisely so it can be read this way.
 
 ---
 

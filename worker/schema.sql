@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS players (
   x_pending     TEXT,                   -- handle awaiting code verification
   x_code        TEXT,                   -- the code that verifies x_pending
   ref_bonus     INTEGER NOT NULL DEFAULT 0,  -- devotion earned from referrals
+  ref_credited  INTEGER NOT NULL DEFAULT 0,  -- monks referred that we have already paid for
+  synced_at     INTEGER,                     -- last chain read, for the sync cooldown
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL
 );
@@ -72,7 +74,8 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS events_wallet ON events (wallet, id DESC);
 
 -- ── meta ───────────────────────────────────────────────────────────────────
--- Key/value scratch: chain sync cursor, kill switches.
+-- Key/value scratch. The chain sync cursor that used to live here is gone:
+-- holdings are read per wallet with eth_call, so there is no block to track.
 CREATE TABLE IF NOT EXISTS meta (
   k TEXT PRIMARY KEY,
   v TEXT NOT NULL
