@@ -169,7 +169,8 @@ There is no indexer and no paid RPC, on purpose.
 The client **never** computes devotion or levels — it renders what `/state`
 returns. A tampered client can lie to its own screen and nowhere else.
 
-- Offices: `confess` 1, `pray` 2, `candles` 4 — a bitmask in `players.tasks_mask`.
+- Daily offices (the three tasks): `confess` 1, `pray` 2, `candles` 4 — a bitmask
+  in `players.tasks_mask`.
   **Never reorder those bits**, they are persisted.
 - 10 devotion per office **per monk held**; all three in a day advances the streak.
 - Streak tiers: 7d ×1.5, 14d ×2, 21d ×2.5, 28d ×3.

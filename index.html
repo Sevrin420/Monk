@@ -5,7 +5,7 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; connect-src 'self' https://rpc.mainnet.chain.robinhood.com https://monk.severin20.workers.dev; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; frame-src 'none'; object-src 'none'; base-uri 'self';">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>MONK — the abbey, 1200 AD</title>
-<meta name="description" content="Keep the offices. Earn devotion. 60 days in an abbey, 1200 AD.">
+<meta name="description" content="Keep the daily offices. Earn devotion. 60 days in an abbey, 1200 AD.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/5.7.2/ethers.umd.min.js"></script>
@@ -1067,34 +1067,35 @@ function drawHUD(g) {
   g.fillStyle = C.goldHi;
   g.fillText(String(p.devotion), 16, by + 8);
   const numW = g.measureText(String(p.devotion)).width;
+  let leftEnd = 16 + numW;
   if (p.monks > 1) {
     g.font = '6px "Press Start 2P", monospace';
     g.fillStyle = C.gold;
-    g.fillText(`x${p.monks}`, 19 + numW, by + 9);
+    const tag = `x${p.monks}`;
+    g.fillText(tag, 19 + numW, by + 9);
+    leftEnd = 19 + numW + g.measureText(tag).width;
   }
 
-  /* the three offices, as lamps: lit when kept */
+  /* The three DAILY OFFICES, as lamps: lit when kept.
+     They own the whole right of this row — Press Start 2P is monospaced at
+     6px/char, so the full label needs 78px and simply will not coexist with
+     the devotion count AND a streak readout on one 240px line. The streak
+     moved down beside the rank to make room, because spelling the words out
+     is worth more than keeping the streak on the top row. */
   const done = p.tasksToday;
-  let ox = 134;
+  const ox0 = 209;                       // three lamps at 9px reach W-9
+  let ox = ox0;
   g.font = '6px "Press Start 2P", monospace';
   g.fillStyle = C.dim; g.textAlign = 'right';
-  g.fillText('OFFICES', ox - 4, by + 8);
+  const label = ['DAILY OFFICES', 'OFFICES', 'DAILY'].find(
+    (t) => ox0 - 4 - g.measureText(t).width > leftEnd + 5);
+  if (label) g.fillText(label, ox0 - 4, by + 8);
   g.textAlign = 'left';
   for (const k of ['confess', 'pray', 'candles']) {
     const has = done.includes(k);
     if (has) drawGlow(g, ox + 2, by + 8, 6, 0.3);
     ellipse(g, ox + 2, by + 8, 2, 2, has ? C.flame2 : 'rgba(120,112,96,0.5)');
     ox += 9;
-  }
-
-  /* streak, or the day count before a streak exists */
-  g.font = FONT; g.textAlign = 'right';
-  if (p.streak > 0) {
-    g.fillStyle = p.multiplier > 1 ? C.flame2 : C.dim;
-    g.fillText(`${p.streak}d x${p.multiplier}`, W - 4, by + 8);
-  } else {
-    g.fillStyle = C.dim;
-    g.fillText(state.clock.ended ? 'CLOSED' : `DAY ${Math.max(0, state.clock.day) + 1}/${state.clock.totalDays}`, W - 4, by + 8);
   }
 
   /* ── the level bar ── */
@@ -1110,13 +1111,27 @@ function drawHUD(g) {
     g.fillStyle = fg; g.fillRect(lx + 1, ly + 1, fw, lh - 2);
     g.fillStyle = 'rgba(255,255,220,0.55)'; g.fillRect(lx + 1, ly + 1, fw, 0.5);
   }
-  /* rank under the bar on the left, the gap to the next level on the right */
+  /* Under the bar: rank left, streak centre, gap to the next level right.
+     The streak lives here rather than on the top row so DAILY OFFICES can be
+     spelled out in full — and it reads well beside the rank, since both are
+     "how far along am I" rather than "what am I worth". */
+  const ty = ly + lh + 2;
   g.font = '6px "Press Start 2P", monospace';
   g.textBaseline = 'top';
   g.textAlign = 'left';  g.fillStyle = C.gold;
-  g.fillText(`L${p.level} ${p.rank.toUpperCase()}`, lx, ly + lh + 2);
+  g.fillText(`L${p.level} ${p.rank.toUpperCase()}`, lx, ty);
   g.textAlign = 'right'; g.fillStyle = C.dim;
-  g.fillText(`${p.toNextLevel} TO L${p.level + 1}`, lx + lw, ly + lh + 2);
+  g.fillText(`${p.toNextLevel} TO L${p.level + 1}`, lx + lw, ty);
+
+  g.textAlign = 'center';
+  if (p.streak > 0) {
+    g.fillStyle = p.multiplier > 1 ? C.flame2 : C.dim;
+    g.fillText(`${p.streak}d x${p.multiplier}`, W / 2, ty);
+  } else {
+    g.fillStyle = C.dim;
+    g.fillText(state.clock.ended ? 'CLOSED'
+      : `DAY ${Math.max(0, state.clock.day) + 1}/${state.clock.totalDays}`, W / 2, ty);
+  }
   g.font = FONT; g.textAlign = 'left';
 }
 
@@ -1288,9 +1303,9 @@ const DENY_LINES = {
   offline:  'The abbey ledger cannot be reached. Try again in a moment.',
   signedOut:'You are not yet of this house. Open THE BOOK and take your vows.',
   noMonk:   'You hold no habit. Mint a Monk in THE BOOK and return.',
-  done:     'You have already kept this office today. Come back at matins.',
+  done:     'You have already kept this daily office. Come back at matins.',
   notOpen:  'The abbey has not yet opened its doors.',
-  closed:   'The fifty-six days are ended. The book is closed.',
+  closed:   'The sixty days are ended. The book is closed.',
 };
 
 async function keepOffice(id) {
@@ -1441,7 +1456,7 @@ function renderBook() {
 
   } else if (bookTab === 2) {    /* ── LEDGER: the offices and the streak ladder ── */
     const done = p.tasksToday;
-    html += `<p class="lead">Three offices a day, ${p.perOffice} devotion each.</p>
+    html += `<p class="lead">Three daily offices, ${p.perOffice} devotion each.</p>
       <div class="tasklist">
         ${['confess','pray','candles'].map(k => `<div>
           <span>${k === 'confess' ? 'CONFESS' : k === 'pray' ? 'PRAY' : 'LIGHT CANDLES'}</span>
@@ -1646,7 +1661,7 @@ function abbotSpeaks() {
   if (!state.signedIn) {
     return say('THE ABBOT', [
       'You have the look of a man who has walked a long way to stand in a cold room.',
-      'Take your vows in THE BOOK, brother. Then the offices will count for something.',
+      'Take your vows in THE BOOK, brother. Then the daily offices will count for something.',
     ]);
   }
   if (!p.monks) {
@@ -1658,7 +1673,7 @@ function abbotSpeaks() {
   }
   const left = 3 - p.tasksToday.length;
   say('THE ABBOT', left > 0
-    ? [`${left} ${left === 1 ? 'office remains' : 'offices remain'} today. Each is worth ${p.perOffice} to you.`,
+    ? [`${left} daily ${left === 1 ? 'office remains' : 'offices remain'} today. Each is worth ${p.perOffice} to you.`,
        p.monks > 1 ? `Ten for the office, and ten again for every habit you keep — ${p.monks} of them.` : 'Take another habit and every office pays twice over.',
        p.streak > 0 ? `Your streak stands at ${p.streak} ${p.streak === 1 ? 'day' : 'days'}. ${nextTierLine(p.streak)}` : 'Keep all three and the streak begins.']
     : ['All three kept. Rest, brother.',

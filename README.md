@@ -1,6 +1,6 @@
 # MONK
 
-An abbey, 1200 AD. Mint a Monk, keep the three daily offices for fifty-six
+An abbey, 1200 AD. Mint a Monk, keep the three daily offices for sixty
 days, and see how much devotion you can carry before the book closes.
 
 Same engine and the same handheld console as Club Nile — flip the switch on
@@ -13,7 +13,7 @@ the front, wait for the title card, press A, and you are in the cloister.
 There is **one score, and it is called Devotion.** The bar fills as you earn it;
 when it fills, you level up.
 
-Three offices a day — **Confess**, **Pray**, **Light Candles**. Each is worth
+Three **daily offices** — **Confess**, **Pray**, **Light Candles**. Each is worth
 10 devotion **per monk you hold**: light the candles with one monk for 10, with
 two for 20, with twenty for 200. Keep all three offices in a day and the day
 counts toward a streak, and streaks multiply everything on top. Engaging with
@@ -29,7 +29,7 @@ an office = 10  ×  streak multiplier  ×  monks held
 |---|---|
 | Chain | Robinhood Chain (4663) — Arbitrum Orbit L2, ETH for gas |
 | Mint | 0.01 ETH, max 20 per wallet — **from the abbey only** |
-| Offices | 3/day × 10 devotion **per monk** |
+| Daily offices | 3/day × 10 devotion **per monk** |
 | Streaks | 7d ×1.5 · 14d ×2 · 21d ×2.5 · 28d ×3 |
 | X engagement | like 2 · comment 3 · repost 5 — × streak only, **not** × monks |
 | Referrals | 20 per Monk minted through your link — flat, no multipliers |
